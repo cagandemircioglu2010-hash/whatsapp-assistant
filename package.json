@@ -1,0 +1,46 @@
+{
+  "name": "company-whatsapp-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Secure WhatsApp assistant backend with a read-only company reporting layer.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "db:migrate:app": "MIGRATION_SCOPE=app tsx src/db/migrate.ts",
+    "db:migrate:company": "MIGRATION_SCOPE=company tsx src/db/migrate.ts",
+    "db:provision-readonly": "tsx scripts/provision-readonly-role.ts",
+    "db:add-user": "tsx scripts/add-whitelisted-user.ts",
+    "db:seed-demo": "tsx scripts/seed-demo-company-data.ts",
+    "reports:smoke": "tsx scripts/smoke-test-reports.ts",
+    "mcp:stdio": "tsx src/mcp/stdio-server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^16.6.1",
+    "fastify": "^5.4.0",
+    "libphonenumber-js": "^1.12.10",
+    "openai": "^6.46.0",
+    "pg": "^8.16.3",
+    "pg-format": "^1.0.4",
+    "pino": "^9.7.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.4",
+    "@types/node": "^24.0.14",
+    "@types/pg": "^8.15.4",
+    "@types/pg-format": "^1.0.5",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}
