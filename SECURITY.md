@@ -22,7 +22,7 @@ Security fixes target the latest `main`. A supported production deployment must:
 - keep Meta signature verification enabled;
 - maintain lifecycle heartbeat and provider backup deletion procedures;
 - export audit verification checkpoints to access-controlled append-only/WORM monitoring;
-- require CI, CodeQL, dependency-review and supply-chain checks before merge.
+- require CI, CodeQL, dependency-audit and supply-chain checks before merge.
 
 ## Key compromise
 

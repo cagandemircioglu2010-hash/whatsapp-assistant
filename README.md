@@ -28,7 +28,7 @@ boyunca şifreli tutulur.
 - OpenAI çağrıları `store=false`, ayrı safety identifier, izinli MCP tool listesi, bounded tool loop ve deterministik
   fallback kullanır.
 - Uygulama ve reporting DB rolleri ayrıdır; reporting transaction'ları zorunlu read-only çalışır.
-- CI: pinned Actions, CodeQL, dependency review, Dependabot, history secret scan, npm audit, coverage/stress testleri
+- CI: pinned Actions, CodeQL, locked dependency audit, Dependabot, history secret scan, npm audit, coverage/stress testleri
   ve Trivy production-image taraması.
 
 ## Akış
