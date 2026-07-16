@@ -1,8 +1,14 @@
 import "dotenv/config";
+import { randomUUID } from "node:crypto";
 import pg from "pg";
-import { hashPhoneIdentifier, normalizePhoneNumber } from "../src/security/phone.js";
+import { normalizePhoneNumber } from "../src/security/phone.js";
 import { reportResources } from "../src/auth/types.js";
-import { EnvelopeEncryption, parseDataEncryptionConfig } from "../src/security/encryption.js";
+import { EnvelopeEncryption } from "../src/security/encryption.js";
+import { VersionedHmac } from "../src/security/keyed-hash.js";
+import { appendAuditEvent } from "../src/messages/audit.repository.js";
+import { assertSafePostgresUrl, databaseTlsFromEnvironment } from "../src/config/database-tls.js";
+import { loadAdminSecurityConfig } from "./security-config.js";
+import { ensureSecurityCanary } from "../src/db/readiness.js";
 
 const { Pool } = pg;
 
@@ -13,12 +19,11 @@ function argument(name: string): string | undefined {
 
 const databaseUrl = process.env.DATABASE_ADMIN_URL;
 if (!databaseUrl) throw new Error("DATABASE_ADMIN_URL must be set");
-const phoneHashSecret = process.env.PHONE_HASH_SECRET;
-const activeKeyId = process.env.DATA_ENCRYPTION_ACTIVE_KEY_ID;
-const keysJson = process.env.DATA_ENCRYPTION_KEYS;
-if (!phoneHashSecret || phoneHashSecret.length < 32) throw new Error("PHONE_HASH_SECRET must be set");
-if (!activeKeyId || !keysJson) throw new Error("Data encryption keys must be set");
-const encryption = new EnvelopeEncryption(parseDataEncryptionConfig(keysJson, activeKeyId));
+assertSafePostgresUrl(databaseUrl);
+const security = loadAdminSecurityConfig();
+const encryption = new EnvelopeEncryption(security.encryption);
+const identifiers = new VersionedHmac(security.identifiers);
+const auditIntegrity = new VersionedHmac(security.auditIntegrity);
 
 const rawPhone = argument("phone");
 const fullName = argument("name");
@@ -45,39 +50,43 @@ if (requestedPermissions.some((resource) => !allowedResources.has(resource))) {
   throw new Error(`Permissions must be one of: ${[...allowedResources].join(", ")}`);
 }
 
-const ssl = process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: true } : false;
+const ssl = databaseTlsFromEnvironment(process.env);
 const pool = new Pool({ connectionString: databaseUrl, ssl, max: 1 });
 const client = await pool.connect();
 
 try {
+  await ensureSecurityCanary(client, encryption, identifiers, auditIntegrity);
   await client.query("BEGIN");
-  const phoneLookupHash = hashPhoneIdentifier(phone, phoneHashSecret);
-  const protectedPhone = encryption.encrypt(phone, "users.phone");
-  const protectedFullName = encryption.encrypt(fullName.trim(), "users.full_name");
-  const normalizedDepartment = department?.trim() || null;
-  const protectedDepartment = normalizedDepartment
-    ? encryption.encrypt(normalizedDepartment, "users.department")
-    : null;
   const existing = await client.query<{ id: string }>(
     `SELECT id FROM users
-     WHERE phone_lookup_hash = $1 OR (phone_lookup_hash IS NULL AND phone_e164 = $2)
+     WHERE phone_lookup_hash::text = ANY($1::text[])
      LIMIT 1
      FOR UPDATE`,
-    [phoneLookupHash, phone]
+    [identifiers.candidates(phone, "phone-identifier").map((candidate) => candidate.hash)]
   );
-  const existingId = existing.rows[0]?.id;
-  const userResult = existingId
+  const existingId = existing.rows[0]?.id ?? randomUUID();
+  const binding = `users:${existingId}`;
+  const phoneLookup = identifiers.hash(phone, "phone-identifier");
+  const protectedPhone = encryption.encrypt(phone, "users.phone", binding);
+  const protectedFullName = encryption.encrypt(fullName.trim(), "users.full_name", binding);
+  const normalizedDepartment = department?.trim() || null;
+  const protectedDepartment = normalizedDepartment
+    ? encryption.encrypt(normalizedDepartment, "users.department", binding)
+    : null;
+  const userResult = existing.rows[0]
     ? await client.query<{ id: string }>(
         `UPDATE users
-         SET phone_e164 = NULL, phone_lookup_hash = $2, phone_ciphertext = $3, phone_key_id = $4,
-             full_name = NULL, full_name_ciphertext = $5, full_name_key_id = $6,
-             department = NULL, department_ciphertext = $7, department_key_id = $8,
-             role = $9, is_active = TRUE, updated_at = NOW()
+         SET phone_lookup_hash = $2, phone_lookup_key_id = $3,
+             phone_ciphertext = $4, phone_key_id = $5,
+             full_name_ciphertext = $6, full_name_key_id = $7,
+             department_ciphertext = $8, department_key_id = $9,
+             role = $10, is_active = TRUE, updated_at = NOW()
          WHERE id = $1
          RETURNING id`,
         [
           existingId,
-          phoneLookupHash,
+          phoneLookup.hash,
+          phoneLookup.keyId,
           protectedPhone.ciphertext,
           protectedPhone.keyId,
           protectedFullName.ciphertext,
@@ -89,14 +98,16 @@ try {
       )
     : await client.query<{ id: string }>(
         `INSERT INTO users (
-           phone_e164, phone_lookup_hash, phone_ciphertext, phone_key_id,
-           full_name, full_name_ciphertext, full_name_key_id,
-           department, department_ciphertext, department_key_id,
+           id, phone_lookup_hash, phone_lookup_key_id, phone_ciphertext, phone_key_id,
+           full_name_ciphertext, full_name_key_id,
+           department_ciphertext, department_key_id,
            role, is_active
-         ) VALUES (NULL, $1, $2, $3, NULL, $4, $5, NULL, $6, $7, $8, TRUE)
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE)
          RETURNING id`,
         [
-          phoneLookupHash,
+          existingId,
+          phoneLookup.hash,
+          phoneLookup.keyId,
           protectedPhone.ciphertext,
           protectedPhone.keyId,
           protectedFullName.ciphertext,
@@ -119,14 +130,16 @@ try {
   }
   await client.query(
     `DELETE FROM permissions
-     WHERE user_id = $1 AND action = 'read' AND NOT (resource = ANY($2::text[]))`,
+     WHERE user_id = $1
+       AND NOT (action = 'read' AND resource = ANY($2::text[]))`,
     [userId, requestedPermissions]
   );
-  await client.query(
-    `INSERT INTO audit_events (user_id, event_type, outcome, details)
-     VALUES ($1, 'identity.whitelist_update', 'success', $2::jsonb)`,
-    [userId, JSON.stringify({ resources: requestedPermissions })]
-  );
+  await appendAuditEvent(client, auditIntegrity, {
+    userId,
+    eventType: "identity.whitelist_update",
+    outcome: "success",
+    details: { resources: requestedPermissions }
+  });
   await client.query("COMMIT");
   process.stdout.write("Whitelisted user is ready.\n");
 } catch (error) {
@@ -135,4 +148,7 @@ try {
 } finally {
   client.release();
   await pool.end();
+  encryption.destroy();
+  identifiers.destroy();
+  auditIntegrity.destroy();
 }

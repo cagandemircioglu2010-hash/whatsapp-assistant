@@ -44,8 +44,12 @@ function extractText(message: UnknownRecord, type: string): string {
   return `[${type}]`;
 }
 
-export function parseIncomingMessages(payload: unknown): IncomingWhatsAppMessage[] {
+export function parseIncomingMessages(
+  payload: unknown,
+  expectedPhoneNumberId?: string
+): IncomingWhatsAppMessage[] {
   const root = record(payload);
+  if (expectedPhoneNumberId && string(root?.object) !== "whatsapp_business_account") return [];
   const entries = boundedArray(root?.entry);
   const output: IncomingWhatsAppMessage[] = [];
   const seenMessageIds = new Set<string>();
@@ -56,6 +60,12 @@ export function parseIncomingMessages(payload: unknown): IncomingWhatsAppMessage
     const changes = boundedArray(entry?.changes);
     for (const changeValue of changes) {
       const value = record(record(changeValue)?.value);
+      if (
+        expectedPhoneNumberId &&
+        string(record(value?.metadata)?.phone_number_id) !== expectedPhoneNumberId
+      ) {
+        continue;
+      }
       const messages = boundedArray(value?.messages);
       for (const messageValue of messages) {
         inspectedEvents += 1;
@@ -91,8 +101,12 @@ export function parseIncomingMessages(payload: unknown): IncomingWhatsAppMessage
   return output;
 }
 
-export function parseMessageStatusUpdates(payload: unknown): WhatsAppMessageStatus[] {
+export function parseMessageStatusUpdates(
+  payload: unknown,
+  expectedPhoneNumberId?: string
+): WhatsAppMessageStatus[] {
   const root = record(payload);
+  if (expectedPhoneNumberId && string(root?.object) !== "whatsapp_business_account") return [];
   const output: WhatsAppMessageStatus[] = [];
   const seen = new Set<string>();
   let inspectedEvents = 0;
@@ -107,6 +121,12 @@ export function parseMessageStatusUpdates(payload: unknown): WhatsAppMessageStat
     const entry = record(entryValue);
     for (const changeValue of boundedArray(entry?.changes)) {
       const value = record(record(changeValue)?.value);
+      if (
+        expectedPhoneNumberId &&
+        string(record(value?.metadata)?.phone_number_id) !== expectedPhoneNumberId
+      ) {
+        continue;
+      }
       for (const statusValue of boundedArray(value?.statuses)) {
         inspectedEvents += 1;
         if (inspectedEvents > MAX_EVENTS_PER_PAYLOAD) return output;

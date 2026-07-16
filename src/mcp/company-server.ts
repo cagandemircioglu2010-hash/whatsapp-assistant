@@ -70,17 +70,19 @@ export function createCompanyMcpServer(dependencies: CompanyMcpServerDependencie
       };
     } catch (error) {
       const permissionDenied = error instanceof PermissionDeniedError;
-      await dependencies.audit.record({
-        userId: dependencies.actor.id,
-        eventType: "mcp.tool_call",
-        resource,
-        outcome: permissionDenied ? "denied" : "failure",
-        messageId: dependencies.messageId ?? null,
-        details: {
-          toolName,
-          errorType: error instanceof Error ? error.name : "UnknownError"
-        }
-      });
+      await dependencies.audit
+        .record({
+          userId: dependencies.actor.id,
+          eventType: "mcp.tool_call",
+          resource,
+          outcome: permissionDenied ? "denied" : "failure",
+          messageId: dependencies.messageId ?? null,
+          details: {
+            toolName,
+            errorType: error instanceof Error ? error.name : "UnknownError"
+          }
+        })
+        .catch(() => undefined);
       const safeError = {
         code: permissionDenied ? "permission_denied" : "tool_failed",
         message: permissionDenied

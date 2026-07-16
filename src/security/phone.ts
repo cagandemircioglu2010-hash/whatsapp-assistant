@@ -1,4 +1,3 @@
-import { createHmac } from "node:crypto";
 import { parsePhoneNumberFromString, type CountryCode } from "libphonenumber-js";
 
 export function normalizePhoneNumber(input: string, defaultCountry: CountryCode = "TR"): string | null {
@@ -7,17 +6,4 @@ export function normalizePhoneNumber(input: string, defaultCountry: CountryCode 
 
   if (!phone?.isValid()) return null;
   return phone.number;
-}
-
-export function hashPhoneIdentifier(phone: string, secret: string): string {
-  return createHmac("sha256", secret).update("phone-identifier\u0000").update(phone).digest("hex");
-}
-
-export function hashOpaqueIdentifier(value: string, secret: string, purpose: string): string {
-  return createHmac("sha256", secret).update(purpose).update("\u0000").update(value).digest("hex");
-}
-
-export function phoneLastFour(phone: string): string {
-  const digits = phone.replace(/\D/g, "");
-  return digits.slice(-4).padStart(4, "*");
 }

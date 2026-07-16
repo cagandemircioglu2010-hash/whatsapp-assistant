@@ -71,11 +71,13 @@ describe("WhatsApp webhook routes", () => {
     const enqueue = vi.fn(async () => "queued" as const);
     const app = await appWithProcessor(enqueue);
     const payload = JSON.stringify({
+      object: "whatsapp_business_account",
       entry: [
         {
           changes: [
             {
               value: {
+                metadata: { phone_number_id: "123456789" },
                 messages: [
                   {
                     id: "wamid.route",
@@ -114,11 +116,13 @@ describe("WhatsApp webhook routes", () => {
     const recordStatus = vi.fn(async () => undefined);
     const app = await appWithProcessor(enqueue, recordStatus);
     const payload = JSON.stringify({
+      object: "whatsapp_business_account",
       entry: [
         {
           changes: [
             {
               value: {
+                metadata: { phone_number_id: "123456789" },
                 statuses: [{ id: "wamid.out", status: "read", timestamp: "1700000010" }]
               }
             }
@@ -146,5 +150,42 @@ describe("WhatsApp webhook routes", () => {
       status: "read",
       timestamp: "1700000010"
     });
+  });
+
+  it("ignores signed events targeted at another WhatsApp phone number", async () => {
+    const enqueue = vi.fn(async () => "queued" as const);
+    const app = await appWithProcessor(enqueue);
+    const payload = JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [{
+        changes: [{
+          value: {
+            metadata: { phone_number_id: "987654321" },
+            messages: [{
+              id: "wamid.wrong-tenant",
+              from: "905551234567",
+              timestamp: "1700000000",
+              type: "text",
+              text: { body: "Satış özeti" }
+            }]
+          }
+        }]
+      }]
+    });
+    const signature = createHmac("sha256", "meta-app-secret-with-32-characters")
+      .update(payload)
+      .digest("hex");
+    const response = await app.inject({
+      method: "POST",
+      url: "/webhooks/whatsapp",
+      headers: {
+        "content-type": "application/json",
+        "x-hub-signature-256": `sha256=${signature}`
+      },
+      payload
+    });
+
+    expect(response.json()).toEqual({ received: true, queued: 0, statuses: 0 });
+    expect(enqueue).not.toHaveBeenCalled();
   });
 });

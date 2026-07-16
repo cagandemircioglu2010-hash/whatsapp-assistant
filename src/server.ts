@@ -2,21 +2,44 @@ import "dotenv/config";
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config/env.js";
 import { createDatabasePool } from "./db/pools.js";
+import { assertRuntimeReady } from "./db/readiness.js";
+import { EnvelopeEncryption } from "./security/encryption.js";
+import { VersionedHmac } from "./security/keyed-hash.js";
 import { createLogger, logSafe } from "./logging/logger.js";
 
 const config = loadConfig();
 const logger = createLogger(config.logLevel);
 const appPool = createDatabasePool(config.databaseUrl, {
-  ssl: config.databaseSsl,
+  tls: config.databaseTls,
   max: 10,
   applicationName: "company-whatsapp-assistant-app"
 });
 const companyReadonlyPool = createDatabasePool(config.companyReadonlyDatabaseUrl, {
-  ssl: config.databaseSsl,
+  tls: config.companyDatabaseTls,
   max: 5,
   applicationName: "company-whatsapp-assistant-reports",
   forceReadOnly: true
 });
+
+if (config.nodeEnv === "production") {
+  if (!config.dataEncryption) throw new Error("Production encryption configuration is missing");
+  const startupEncryption = new EnvelopeEncryption(config.dataEncryption);
+  const startupIdentifiers = new VersionedHmac(config.identifierHash);
+  const startupAuditIntegrity = new VersionedHmac(config.auditIntegrity);
+  try {
+    await assertRuntimeReady(
+      appPool,
+      companyReadonlyPool,
+      startupEncryption,
+      startupIdentifiers,
+      startupAuditIntegrity
+    );
+  } finally {
+    startupEncryption.destroy();
+    startupIdentifiers.destroy();
+    startupAuditIntegrity.destroy();
+  }
+}
 
 const app = await buildApp({ config, appPool, companyReadonlyPool, logger });
 

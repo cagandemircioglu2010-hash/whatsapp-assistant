@@ -103,7 +103,7 @@ describe("LLM company assistant", () => {
     });
 
     const result = await assistant.handle(
-      { id: "user-secret-id", fullName: "User", department: "Sales", role: "employee" },
+      { id: "user-secret-id", department: "Sales", role: "employee" },
       "Bu haftaki satışlar nasıl?",
       { messageId: "message-1" }
     );
@@ -151,7 +151,7 @@ describe("LLM company assistant", () => {
 
     await expect(
       assistant.handle(
-        { id: "user-1", fullName: "User", department: null, role: "employee" },
+        { id: "user-1", department: null, role: "employee" },
         "Satış özeti",
         { messageId: "message-2" }
       )

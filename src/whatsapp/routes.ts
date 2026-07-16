@@ -7,6 +7,7 @@ import { timingSafeStringEqual, verifyMetaSignature } from "./signature.js";
 type RouteDependencies = {
   config: AppConfig["whatsapp"];
   processor: MessageProcessor;
+  isDecommissioned?: () => Promise<boolean>;
 };
 
 export async function registerWhatsAppRoutes(app: FastifyInstance, dependencies: RouteDependencies): Promise<void> {
@@ -21,6 +22,9 @@ export async function registerWhatsAppRoutes(app: FastifyInstance, dependencies:
         query["hub.challenge"] &&
         /^\d{1,256}$/.test(query["hub.challenge"])
       ) {
+        if (await dependencies.isDecommissioned?.()) {
+          return reply.code(503).send({ error: "Service is decommissioned" });
+        }
         return reply.type("text/plain").send(query["hub.challenge"]);
       }
       return reply.code(403).send({ error: "Webhook verification failed" });
@@ -41,12 +45,18 @@ export async function registerWhatsAppRoutes(app: FastifyInstance, dependencies:
         return reply.code(401).send({ error: "Invalid webhook signature" });
       }
     }
+    if (await dependencies.isDecommissioned?.()) {
+      return reply.code(503).send({ error: "Service is decommissioned" });
+    }
 
-    const incomingMessages = parseIncomingMessages(request.body);
-    const statusUpdates = parseMessageStatusUpdates(request.body);
+    const expectedPhoneNumberId = dependencies.config.phoneNumberId;
+    const incomingMessages = parseIncomingMessages(request.body, expectedPhoneNumberId);
+    const statusUpdates = parseMessageStatusUpdates(request.body, expectedPhoneNumberId);
+    let queued = 0;
     for (let index = 0; index < incomingMessages.length; index += 4) {
       const batch = incomingMessages.slice(index, index + 4);
-      await Promise.all(batch.map((incoming) => dependencies.processor.enqueue(incoming)));
+      const results = await Promise.all(batch.map((incoming) => dependencies.processor.enqueue(incoming)));
+      queued += results.filter((result) => result === "queued").length;
     }
     for (let index = 0; index < statusUpdates.length; index += 10) {
       await Promise.all(
@@ -56,6 +66,6 @@ export async function registerWhatsAppRoutes(app: FastifyInstance, dependencies:
 
     return reply
       .code(200)
-      .send({ received: true, queued: incomingMessages.length, statuses: statusUpdates.length });
+      .send({ received: true, queued, statuses: statusUpdates.length });
   });
 }

@@ -1,11 +1,12 @@
 import "dotenv/config";
 import { CompanyReportRepository } from "../src/reports/company-report.repository.js";
 import { createDatabasePool } from "../src/db/pools.js";
+import { databaseTlsFromEnvironment } from "../src/config/database-tls.js";
 
 const connectionString = process.env.COMPANY_READONLY_DATABASE_URL;
 if (!connectionString) throw new Error("COMPANY_READONLY_DATABASE_URL must be set");
 const pool = createDatabasePool(connectionString, {
-  ssl: process.env.DATABASE_SSL === "true",
+  tls: databaseTlsFromEnvironment(process.env, "company"),
   max: 1,
   applicationName: "company-assistant-smoke-test",
   forceReadOnly: true

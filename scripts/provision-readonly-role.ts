@@ -1,6 +1,7 @@
 import "dotenv/config";
 import pg from "pg";
 import format from "pg-format";
+import { assertSafePostgresUrl, databaseTlsFromEnvironment } from "../src/config/database-tls.js";
 
 const { Pool } = pg;
 
@@ -10,6 +11,7 @@ const rolePassword = process.env.COMPANY_READONLY_PASSWORD;
 const dedicatedDatabaseConfirmed = process.argv.includes("--confirm-dedicated-database");
 
 if (!adminUrl) throw new Error("COMPANY_DATABASE_ADMIN_URL or DATABASE_ADMIN_URL must be set");
+assertSafePostgresUrl(adminUrl);
 if (!roleName || !/^[a-z][a-z0-9_]{2,62}$/.test(roleName)) {
   throw new Error("COMPANY_READONLY_USER must be a safe PostgreSQL role name");
 }
@@ -22,7 +24,7 @@ if (!dedicatedDatabaseConfirmed) {
   );
 }
 
-const ssl = process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: true } : false;
+const ssl = databaseTlsFromEnvironment(process.env, "company");
 const pool = new Pool({ connectionString: adminUrl, ssl, max: 1 });
 const client = await pool.connect();
 
@@ -64,6 +66,12 @@ try {
   await client.query(format("REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC", databaseName));
 
   await client.query("REVOKE CREATE ON SCHEMA public FROM PUBLIC");
+  await client.query("REVOKE USAGE ON SCHEMA public FROM PUBLIC");
+  await client.query("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC");
+  await client.query("REVOKE ALL ON SCHEMA company_source FROM PUBLIC");
+  await client.query("REVOKE ALL ON ALL TABLES IN SCHEMA company_source FROM PUBLIC");
+  await client.query("REVOKE ALL ON SCHEMA assistant_reporting FROM PUBLIC");
+  await client.query("REVOKE ALL ON ALL TABLES IN SCHEMA assistant_reporting FROM PUBLIC");
   await client.query(format("REVOKE CREATE ON SCHEMA public FROM %I", roleName));
   await client.query(format("REVOKE USAGE ON SCHEMA public FROM %I", roleName));
   await client.query(format("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %I", roleName));

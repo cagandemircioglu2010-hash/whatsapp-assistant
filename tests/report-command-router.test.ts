@@ -10,7 +10,7 @@ import type {
 } from "../src/reports/company-report.repository.js";
 import { ReportCommandRouter } from "../src/reports/report-command-router.js";
 
-const user: AuthorizedUser = { id: "user-1", fullName: "Test User", department: "Sales", role: "employee" };
+const user: AuthorizedUser = { id: "user-1", department: "Sales", role: "employee" };
 
 class FakePermissions implements PermissionLookup {
   constructor(private readonly allowed: boolean) {}

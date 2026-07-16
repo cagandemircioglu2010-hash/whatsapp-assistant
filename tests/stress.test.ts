@@ -10,6 +10,8 @@ import type {
   SaveOutboundInput
 } from "../src/messages/message.repository.js";
 import { TokenBucketRateLimiter } from "../src/security/rate-limiter.js";
+import { InMemoryRateLimitStore } from "../src/security/rate-limiter.js";
+import { legacyHmacKeyRing, VersionedHmac } from "../src/security/keyed-hash.js";
 import type { WhatsAppSender } from "../src/whatsapp/types.js";
 import { parseIncomingMessages } from "../src/whatsapp/webhook-parser.js";
 
@@ -84,7 +86,6 @@ describe("adversarial and stress behavior", () => {
     const users: UserLookup = {
       findActiveByPhone: async () => ({
         id: "stress-user",
-        fullName: "Stress User",
         department: "Engineering",
         role: "employee"
       })
@@ -107,9 +108,12 @@ describe("adversarial and stress behavior", () => {
         })
       },
       logger: createLogger("silent"),
-      phoneHashSecret: "x".repeat(32),
+      identifiers: new VersionedHmac(legacyHmacKeyRing("x".repeat(32))),
+      rateLimits: new InMemoryRateLimitStore(),
       defaultCountry: "TR",
-      rateLimitPerMinute: 1000
+      rateLimitPerMinute: 1000,
+      ingressSenderRateLimitPerMinute: 1000,
+      ingressGlobalRateLimitPerMinute: 10000
     });
 
     const results = await Promise.all(
@@ -148,7 +152,6 @@ describe("adversarial and stress behavior", () => {
       users: {
         findActiveByPhone: async () => ({
           id: "bounded-user",
-          fullName: "Bounded User",
           department: "Engineering",
           role: "employee"
         })
@@ -166,9 +169,12 @@ describe("adversarial and stress behavior", () => {
         }
       },
       logger: createLogger("silent"),
-      phoneHashSecret: "x".repeat(32),
+      identifiers: new VersionedHmac(legacyHmacKeyRing("x".repeat(32))),
+      rateLimits: new InMemoryRateLimitStore(),
       defaultCountry: "TR",
       rateLimitPerMinute: 1000,
+      ingressSenderRateLimitPerMinute: 1000,
+      ingressGlobalRateLimitPerMinute: 10000,
       workerConcurrency: 3
     });
 

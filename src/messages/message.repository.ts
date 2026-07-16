@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import type { EnvelopeEncryption } from "../security/encryption.js";
-import { hashOpaqueIdentifier } from "../security/phone.js";
+import type { VersionedHash, VersionedHmac } from "../security/keyed-hash.js";
 import type { WhatsAppMessageStatus } from "../whatsapp/types.js";
 
 export type InboundMessageRecord = {
@@ -14,13 +15,14 @@ export type PendingInboundMessage = {
   userId: string;
   content: string | null;
   senderPhoneHash: string;
+  senderPhoneKeyId: string;
 };
 
 export type SaveInboundInput = {
   externalMessageId: string;
-  userId: string | null;
-  content: string | null;
-  senderPhoneHash: string;
+  userId: string;
+  content: string;
+  senderPhone: VersionedHash;
   messageType: string;
   metadata?: Record<string, unknown>;
 };
@@ -29,7 +31,7 @@ export type SaveOutboundInput = {
   externalMessageId?: string | null;
   userId: string;
   content: string;
-  senderPhoneHash: string;
+  senderPhone: VersionedHash;
   status: "sent" | "failed";
   metadata?: Record<string, unknown>;
 };
@@ -79,38 +81,60 @@ export class MessageRepository implements MessageStore {
   constructor(
     private readonly pool: Pool,
     private readonly encryption: EnvelopeEncryption | null,
-    private readonly identifierHashSecret: string
+    private readonly identifiers: VersionedHmac
   ) {}
 
-  private externalMessageIdHash(externalMessageId: string): string {
-    return hashOpaqueIdentifier(externalMessageId, this.identifierHashSecret, "whatsapp-message-id");
+  private externalIdentifier(externalMessageId: string): VersionedHash {
+    return this.identifiers.hash(externalMessageId, "whatsapp-message-id");
   }
 
-  private encryptContent(content: string | null): { ciphertext: string | null; keyId: string | null } {
-    if (content === null) return { ciphertext: null, keyId: null };
+  private externalIdentifierCandidates(externalMessageId: string): string[] {
+    return this.identifiers
+      .candidates(externalMessageId, "whatsapp-message-id")
+      .map((candidate) => candidate.hash);
+  }
+
+  private encryptContent(content: string, messageId: string): { ciphertext: string; keyId: string } {
     if (!this.encryption) throw new Error("Message encryption is not configured");
-    const encrypted = this.encryption.encrypt(content, "messages.content");
+    const encrypted = this.encryption.encrypt(content, "messages.content", `messages:${messageId}`);
     return { ciphertext: encrypted.ciphertext, keyId: encrypted.keyId };
   }
 
   async saveInbound(input: SaveInboundInput): Promise<InboundMessageRecord> {
-    const protectedContent = this.encryptContent(input.content);
+    const existing = await this.pool.query<MessageRow>(
+      `SELECT id, status, processing_attempts
+       FROM messages
+       WHERE external_message_id_hash::text = ANY($1::text[])
+       LIMIT 1`,
+      [this.externalIdentifierCandidates(input.externalMessageId)]
+    );
+    if (existing.rows[0]) {
+      const row = existing.rows[0];
+      return { id: row.id, status: row.status, processingAttempts: row.processing_attempts };
+    }
+
+    const id = randomUUID();
+    const protectedContent = this.encryptContent(input.content, id);
+    const external = this.externalIdentifier(input.externalMessageId);
     const result = await this.pool.query<MessageRow>(
       `INSERT INTO messages (
-         external_message_id, external_message_id_hash, user_id, direction, message_type, content,
-         content_ciphertext, content_key_id, sender_phone_hash, status, metadata
-       )
-       VALUES (NULL, $1, $2, 'inbound', $3, NULL, $4, $5, $6, 'received', $7::jsonb)
+         id, external_message_id_hash, external_message_id_key_id, user_id, direction,
+         message_type, content_ciphertext, content_key_id, sender_phone_hash,
+         sender_phone_key_id, status, metadata
+       ) VALUES ($1, $2, $3, $4, 'inbound', $5, $6, $7, $8, $9, 'received', $10::jsonb)
        ON CONFLICT (external_message_id_hash) WHERE external_message_id_hash IS NOT NULL
        DO UPDATE SET external_message_id_hash = EXCLUDED.external_message_id_hash
        RETURNING id, status, processing_attempts`,
       [
-        this.externalMessageIdHash(input.externalMessageId),
+        id,
+        external.hash,
+        external.keyId,
         input.userId,
         input.messageType,
         protectedContent.ciphertext,
         protectedContent.keyId,
-        input.senderPhoneHash,
+        input.senderPhone.hash,
+        input.senderPhone.keyId,
         JSON.stringify(input.metadata ?? {})
       ]
     );
@@ -123,9 +147,7 @@ export class MessageRepository implements MessageStore {
     const result = await this.pool.query(
       `UPDATE messages
        SET status = 'processing', processing_attempts = processing_attempts + 1, updated_at = NOW()
-       WHERE id = $1
-         AND status IN ('received', 'failed')
-         AND processing_attempts < 3
+       WHERE id = $1 AND status IN ('received', 'failed') AND processing_attempts < 3
        RETURNING id`,
       [messageId]
     );
@@ -136,19 +158,15 @@ export class MessageRepository implements MessageStore {
     const result = await this.pool.query<{
       id: string;
       user_id: string;
-      content: string | null;
       content_ciphertext: string | null;
       sender_phone_hash: string;
+      sender_phone_key_id: string;
     }>(
       `WITH candidate AS (
-         SELECT id
-         FROM messages
-         WHERE direction = 'inbound'
-           AND user_id IS NOT NULL
-           AND (
-             status IN ('received', 'failed')
-             OR (status = 'processing' AND updated_at < NOW() - INTERVAL '2 minutes')
-           )
+         SELECT id FROM messages
+         WHERE direction = 'inbound' AND user_id IS NOT NULL
+           AND (status IN ('received', 'failed')
+             OR (status = 'processing' AND updated_at < NOW() - INTERVAL '2 minutes'))
            AND processing_attempts < 3
          ORDER BY created_at, id
          FOR UPDATE SKIP LOCKED
@@ -158,83 +176,80 @@ export class MessageRepository implements MessageStore {
        SET status = 'processing', processing_attempts = processing_attempts + 1, updated_at = NOW()
        FROM candidate
        WHERE message.id = candidate.id
-       RETURNING message.id, message.user_id, message.content, message.content_ciphertext,
-                 message.sender_phone_hash`,
+       RETURNING message.id, message.user_id, message.content_ciphertext,
+                 message.sender_phone_hash, message.sender_phone_key_id`,
       []
     );
     const row = result.rows[0];
     if (!row) return null;
     const content = row.content_ciphertext
-      ? this.encryption?.decrypt(row.content_ciphertext, "messages.content") ?? null
-      : row.content;
+      ? this.encryption?.decrypt(row.content_ciphertext, "messages.content", `messages:${row.id}`) ?? null
+      : null;
     return {
       id: row.id,
       userId: row.user_id,
       content,
-      senderPhoneHash: row.sender_phone_hash
+      senderPhoneHash: row.sender_phone_hash,
+      senderPhoneKeyId: row.sender_phone_key_id
     };
   }
 
   async setInboundStatus(messageId: string, status: "processed" | "ignored" | "failed"): Promise<void> {
-    await this.pool.query("UPDATE messages SET status = $2, updated_at = NOW() WHERE id = $1", [
-      messageId,
-      status
-    ]);
+    await this.pool.query("UPDATE messages SET status = $2, updated_at = NOW() WHERE id = $1", [messageId, status]);
   }
 
   async saveOutbound(input: SaveOutboundInput): Promise<string> {
-    const protectedContent = this.encryptContent(input.content);
+    const id = randomUUID();
+    const protectedContent = this.encryptContent(input.content, id);
+    const external = input.externalMessageId ? this.externalIdentifier(input.externalMessageId) : null;
     const result = await this.pool.query<{ id: string }>(
       `INSERT INTO messages (
-         external_message_id, external_message_id_hash, user_id, direction, message_type, content,
-         content_ciphertext, content_key_id, sender_phone_hash, status, metadata
-       )
-       VALUES (NULL, $1, $2, 'outbound', 'text', NULL, $3, $4, $5, $6, $7::jsonb)
+         id, external_message_id_hash, external_message_id_key_id, user_id, direction,
+         message_type, content_ciphertext, content_key_id, sender_phone_hash,
+         sender_phone_key_id, status, metadata
+       ) VALUES ($1, $2, $3, $4, 'outbound', 'text', $5, $6, $7, $8, $9, $10::jsonb)
        RETURNING id`,
       [
-        input.externalMessageId ? this.externalMessageIdHash(input.externalMessageId) : null,
+        id,
+        external?.hash ?? null,
+        external?.keyId ?? null,
         input.userId,
         protectedContent.ciphertext,
         protectedContent.keyId,
-        input.senderPhoneHash,
+        input.senderPhone.hash,
+        input.senderPhone.keyId,
         input.status,
         JSON.stringify(input.metadata ?? {})
       ]
     );
-    const id = result.rows[0]?.id;
-    if (!id) throw new Error("Outbound message could not be stored");
-    return id;
+    const storedId = result.rows[0]?.id;
+    if (!storedId) throw new Error("Outbound message could not be stored");
+    return storedId;
   }
 
   async reserveOutbound(input: ReserveOutboundInput): Promise<OutboundReservation> {
-    const protectedContent = this.encryptContent(input.content);
-    const reserved = await this.pool.query<{ id: string; status: string }>(
+    const id = randomUUID();
+    const protectedContent = this.encryptContent(input.content, id);
+    const inserted = await this.pool.query<{ id: string; status: string }>(
       `INSERT INTO messages (
-         user_id, direction, message_type, content, content_ciphertext, content_key_id,
-         sender_phone_hash, status, metadata, reply_to_message_id, delivery_attempts
-       )
-       VALUES ($1, 'outbound', 'text', NULL, $2, $3, $4, 'sending', $5::jsonb, $6, 1)
-       ON CONFLICT (reply_to_message_id) WHERE reply_to_message_id IS NOT NULL
-       DO UPDATE SET
-         status = 'sending',
-         content_ciphertext = EXCLUDED.content_ciphertext,
-         content_key_id = EXCLUDED.content_key_id,
-         metadata = EXCLUDED.metadata,
-         delivery_attempts = messages.delivery_attempts + 1,
-         updated_at = NOW()
-       WHERE messages.status = 'failed' AND messages.delivery_attempts < 3
+         id, user_id, direction, message_type, content_ciphertext, content_key_id,
+         sender_phone_hash, sender_phone_key_id, status, metadata,
+         reply_to_message_id, delivery_attempts
+       ) VALUES ($1, $2, 'outbound', 'text', $3, $4, $5, $6, 'sending', $7::jsonb, $8, 1)
+       ON CONFLICT (reply_to_message_id) WHERE reply_to_message_id IS NOT NULL DO NOTHING
        RETURNING id, status`,
       [
+        id,
         input.userId,
         protectedContent.ciphertext,
         protectedContent.keyId,
-        input.senderPhoneHash,
+        input.senderPhone.hash,
+        input.senderPhone.keyId,
         JSON.stringify(input.metadata ?? {}),
         input.replyToMessageId
       ]
     );
-    const newReservation = reserved.rows[0];
-    if (newReservation) return { ...newReservation, shouldSend: true };
+    if (inserted.rows[0]) return { ...inserted.rows[0], shouldSend: true };
 
     const existing = await this.pool.query<{ id: string; status: string }>(
       "SELECT id, status FROM messages WHERE reply_to_message_id = $1 LIMIT 1",
@@ -242,17 +257,30 @@ export class MessageRepository implements MessageStore {
     );
     const row = existing.rows[0];
     if (!row) throw new Error("Outbound reservation could not be resolved");
+    if (row.status === "failed") {
+      const retryContent = this.encryptContent(input.content, row.id);
+      const retried = await this.pool.query<{ id: string; status: string }>(
+        `UPDATE messages
+         SET status = 'sending', content_ciphertext = $2, content_key_id = $3,
+             metadata = $4::jsonb, delivery_attempts = delivery_attempts + 1, updated_at = NOW()
+         WHERE id = $1 AND status = 'failed' AND delivery_attempts < 3
+         RETURNING id, status`,
+        [row.id, retryContent.ciphertext, retryContent.keyId, JSON.stringify(input.metadata ?? {})]
+      );
+      if (retried.rows[0]) return { ...retried.rows[0], shouldSend: true };
+    }
     return { ...row, shouldSend: false };
   }
 
   async markOutboundSent(messageId: string, externalMessageId: string): Promise<void> {
+    const external = this.externalIdentifier(externalMessageId);
     const result = await this.pool.query<{ id: string }>(
       `UPDATE messages
-       SET external_message_id = NULL, external_message_id_hash = $2,
+       SET external_message_id_hash = $2, external_message_id_key_id = $3,
            status = 'sent', updated_at = NOW()
        WHERE id = $1 AND status = 'sending'
        RETURNING id`,
-      [messageId, this.externalMessageIdHash(externalMessageId)]
+      [messageId, external.hash, external.keyId]
     );
     if (!result.rows[0]) throw new Error("Outbound delivery state could not be finalized");
   }
@@ -266,8 +294,7 @@ export class MessageRepository implements MessageStore {
 
   async markOutboundDeliveryUnknown(messageId: string): Promise<void> {
     await this.pool.query(
-      `UPDATE messages
-       SET status = 'delivery_unknown', updated_at = NOW()
+      `UPDATE messages SET status = 'delivery_unknown', updated_at = NOW()
        WHERE id = $1 AND status IN ('sending', 'failed')`,
       [messageId]
     );
@@ -280,58 +307,17 @@ export class MessageRepository implements MessageStore {
     const result = await this.pool.query<{ id: string; user_id: string | null }>(
       `UPDATE messages
        SET status = $2, updated_at = NOW()
-       WHERE external_message_id_hash = $1
+       WHERE external_message_id_hash::text = ANY($1::text[])
          AND direction = 'outbound'
-         AND (
-           ($2 = 'sent' AND status IN ('sending', 'sent'))
-           OR ($2 = 'delivered' AND status IN ('sent', 'delivered'))
-           OR ($2 = 'read' AND status IN ('sent', 'delivered', 'read'))
-           OR ($2 = 'failed' AND status IN ('sending', 'sent', 'failed'))
-         )
+         AND (($2 = 'sent' AND status IN ('sending', 'delivery_unknown'))
+           OR ($2 = 'delivered' AND status IN ('sending', 'delivery_unknown', 'sent'))
+           OR ($2 = 'read' AND status IN ('sending', 'delivery_unknown', 'sent', 'delivered'))
+           OR ($2 = 'failed' AND status IN ('sending', 'delivery_unknown', 'sent')))
        RETURNING id, user_id`,
-      [this.externalMessageIdHash(externalMessageId), status]
+      [this.externalIdentifierCandidates(externalMessageId), status]
     );
     const row = result.rows[0];
     return row ? { id: row.id, userId: row.user_id } : null;
   }
 
-  async listRecentForUser(userId: string, limit = 50): Promise<Array<Record<string, unknown>>> {
-    const safeLimit = Math.min(Math.max(limit, 1), 100);
-    const result = await this.pool.query(
-      `SELECT id, direction, message_type, content,
-              content_ciphertext, status, created_at
-       FROM messages
-       WHERE user_id = $1
-       ORDER BY created_at DESC
-       LIMIT $2`,
-      [userId, safeLimit]
-    );
-    return result.rows.map((row) => {
-      const encrypted = typeof row.content_ciphertext === "string" ? row.content_ciphertext : null;
-      const content = encrypted
-        ? this.encryption?.decrypt(encrypted, "messages.content") ?? null
-        : (row.content ?? null);
-      const { content_ciphertext: _ciphertext, ...safeRow } = row;
-      return { ...safeRow, content };
-    });
-  }
-
-  async purgeExpiredContent(retentionDays: number): Promise<number> {
-    if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 365) {
-      throw new Error("Retention days must be between 1 and 365");
-    }
-    const result = await this.pool.query(
-      `UPDATE messages
-       SET content = NULL, content_ciphertext = NULL, content_key_id = NULL,
-           metadata = '{}'::jsonb, updated_at = NOW()
-       WHERE created_at < NOW() - ($1::integer * INTERVAL '1 day')
-         AND (
-           content IS NOT NULL
-           OR content_ciphertext IS NOT NULL
-           OR metadata <> '{}'::jsonb
-         )`,
-      [retentionDays]
-    );
-    return result.rowCount ?? 0;
-  }
 }

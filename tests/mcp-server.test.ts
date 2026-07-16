@@ -43,7 +43,7 @@ describe("company MCP server", () => {
       audit
     });
     const session = await factory.open(
-      { id: "secret-actor-id", fullName: "Test User", department: "Sales", role: "employee" },
+      { id: "secret-actor-id", department: "Sales", role: "employee" },
       { messageId: "message-1" }
     );
 
@@ -85,7 +85,7 @@ describe("company MCP server", () => {
       authorization: new AuthorizationService(permissions),
       audit: new MemoryAudit()
     }).open(
-      { id: "user-1", fullName: "Test", department: null, role: "employee" },
+      { id: "user-1", department: null, role: "employee" },
       { messageId: "message-2" }
     );
     try {

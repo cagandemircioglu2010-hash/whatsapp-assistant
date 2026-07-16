@@ -1,16 +1,19 @@
 import pg, { type Pool, type PoolClient } from "pg";
+import { assertSafePostgresUrl, type DatabaseTlsConfig } from "../config/database-tls.js";
 
 const { Pool: PgPool } = pg;
 
 type PoolOptions = {
-  ssl: boolean;
+  tls: DatabaseTlsConfig;
   max?: number;
   applicationName: string;
   forceReadOnly?: boolean;
 };
 
 export function createDatabasePool(connectionString: string, options: PoolOptions): Pool {
+  assertSafePostgresUrl(connectionString);
   const sessionOptions = [
+    `-c search_path=${options.forceReadOnly ? "pg_catalog,assistant_reporting" : "pg_catalog,public"}`,
     `-c statement_timeout=${options.forceReadOnly ? 5000 : 10000}`,
     "-c lock_timeout=2000",
     "-c idle_in_transaction_session_timeout=10000",
@@ -22,7 +25,7 @@ export function createDatabasePool(connectionString: string, options: PoolOption
     max: options.max ?? 10,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
-    ssl: options.ssl ? { rejectUnauthorized: true } : false,
+    ssl: options.tls,
     options: sessionOptions
   });
 }

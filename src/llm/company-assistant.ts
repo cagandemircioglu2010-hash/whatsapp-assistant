@@ -67,7 +67,11 @@ function serializeToolResult(result: McpToolResult): string {
     }
   };
   const serialized = JSON.stringify(value);
-  return serialized.length <= 20_000 ? serialized : `${serialized.slice(0, 19_900)}...[truncated]`;
+  if (serialized.length <= 20_000) return serialized;
+  return JSON.stringify({
+    untrustedCompanyDataTruncated: true,
+    preview: serialized.slice(0, 19_000)
+  });
 }
 
 function finalText(value: string): string {

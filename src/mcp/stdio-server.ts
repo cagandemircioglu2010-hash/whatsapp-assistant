@@ -10,6 +10,9 @@ import { CompanyReportRepository } from "../reports/company-report.repository.js
 import { normalizePhoneNumber } from "../security/phone.js";
 import { createCompanyMcpServer } from "./company-server.js";
 import { EnvelopeEncryption } from "../security/encryption.js";
+import { VersionedHmac } from "../security/keyed-hash.js";
+import { assertRuntimeReady } from "../db/readiness.js";
+import { redactString } from "../security/redact.js";
 
 const config = loadConfig();
 const rawActorPhone = process.env.MCP_ACTOR_PHONE;
@@ -18,20 +21,26 @@ const actorPhone = normalizePhoneNumber(rawActorPhone, config.defaultPhoneCountr
 if (!actorPhone) throw new Error("MCP_ACTOR_PHONE is not valid");
 
 const appPool = createDatabasePool(config.databaseUrl, {
-  ssl: config.databaseSsl,
+  tls: config.databaseTls,
   max: 2,
   applicationName: "company-mcp-identity"
 });
 const readonlyPool = createDatabasePool(config.companyReadonlyDatabaseUrl, {
-  ssl: config.databaseSsl,
+  tls: config.companyDatabaseTls,
   max: 2,
   applicationName: "company-mcp-reports",
   forceReadOnly: true
 });
+const encryption = config.dataEncryption ? new EnvelopeEncryption(config.dataEncryption) : null;
+const identifiers = new VersionedHmac(config.identifierHash);
+const auditIntegrity = new VersionedHmac(config.auditIntegrity);
 
 try {
-  const encryption = config.dataEncryption ? new EnvelopeEncryption(config.dataEncryption) : null;
-  const users = new UserRepository(appPool, config.phoneHashSecret, encryption);
+  if (config.nodeEnv === "production") {
+    if (!encryption) throw new Error("Production encryption configuration is missing");
+    await assertRuntimeReady(appPool, readonlyPool, encryption, identifiers, auditIntegrity);
+  }
+  const users = new UserRepository(appPool, identifiers, encryption);
   const actor = await users.findActiveByPhone(actorPhone);
   if (!actor) throw new Error("MCP actor is not an active whitelisted user");
 
@@ -39,7 +48,7 @@ try {
     actor,
     reports: new CompanyReportRepository(readonlyPool),
     authorization: new AuthorizationService(new PermissionRepository(appPool)),
-    audit: new AuditRepository(appPool)
+    audit: new AuditRepository(appPool, auditIntegrity)
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -48,12 +57,21 @@ try {
   const shutdown = async () => {
     await server.close();
     await Promise.all([appPool.end(), readonlyPool.end()]);
+    encryption?.destroy();
+    identifiers.destroy();
+    auditIntegrity.destroy();
   };
   process.once("SIGINT", () => void shutdown());
   process.once("SIGTERM", () => void shutdown());
 } catch (error) {
   await Promise.all([appPool.end(), readonlyPool.end()]);
-  const message = error instanceof Error ? error.message : "Unknown MCP startup error";
+  encryption?.destroy();
+  identifiers.destroy();
+  auditIntegrity.destroy();
+  const message =
+    config.nodeEnv === "production"
+      ? error instanceof Error ? error.name : "UnknownError"
+      : error instanceof Error ? redactString(error.message) : "Unknown MCP startup error";
   process.stderr.write(`MCP server failed: ${message}\n`);
   process.exit(1);
 }
