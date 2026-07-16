@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import type { AppConfig } from "../src/config/env.js";
 import { createLogger } from "../src/logging/logger.js";
+import { legacyHmacKeyRing } from "../src/security/keyed-hash.js";
 
 const apps: Array<Awaited<ReturnType<typeof buildApp>>> = [];
 
@@ -14,8 +15,11 @@ function config(): AppConfig {
     logLevel: "silent",
     databaseUrl: "postgresql://test:test@localhost:5432/app",
     companyReadonlyDatabaseUrl: "postgresql://test:test@localhost:5432/company",
-    databaseSsl: false,
-    phoneHashSecret: "x".repeat(32),
+    databaseTls: false,
+    companyDatabaseTls: false,
+    identifierHash: legacyHmacKeyRing("x".repeat(32)),
+    auditIntegrity: legacyHmacKeyRing("a".repeat(32)),
+    safetyIdentifierSecret: "s".repeat(32),
     defaultPhoneCountry: "TR",
     companyTimezone: "Europe/Istanbul",
     dataEncryption: null,
@@ -24,6 +28,9 @@ function config(): AppConfig {
     auditRetentionDays: 365,
     webhookBodyLimitBytes: 16_384,
     userRateLimitPerMinute: 20,
+    ingressSenderRateLimitPerMinute: 10,
+    ingressGlobalRateLimitPerMinute: 600,
+    dataLifecycleIntervalMinutes: 60,
     messageWorkerConcurrency: 4,
     whatsapp: { enabled: false, graphApiVersion: "v25.0", requireSignature: true },
     llm: {

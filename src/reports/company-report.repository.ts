@@ -2,7 +2,13 @@ import type { Pool } from "pg";
 import { z } from "zod";
 import { withReadOnlyTransaction } from "../db/pools.js";
 
-const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const isoDate = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((value) => {
+    const parsed = new Date(`${value}T00:00:00Z`);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+  }, "Date is not a real calendar day");
 
 const dateRangeSchema = z
   .object({
@@ -124,7 +130,9 @@ export class CompanyReportRepository implements CompanyReports {
         overdue_task_count: number;
         updated_at: Date;
       }>(
-        `SELECT id, name, department, status, owner_name, start_date, due_date,
+        `SELECT id, LEFT(name, 200) AS name, LEFT(department, 100) AS department,
+                LEFT(status, 32) AS status, LEFT(owner_name, 120) AS owner_name,
+                start_date, due_date,
                 open_task_count, overdue_task_count, updated_at
          FROM assistant_reporting.active_projects
          WHERE ($1::text IS NULL OR department = $1)
@@ -166,8 +174,10 @@ export class CompanyReportRepository implements CompanyReports {
         days_overdue: number;
         updated_at: Date;
       }>(
-        `SELECT id, project_id, project_name, department, title, status,
-                assignee_name, priority, due_date, days_overdue, updated_at
+        `SELECT id, project_id, LEFT(project_name, 200) AS project_name,
+                LEFT(department, 100) AS department, LEFT(title, 200) AS title,
+                LEFT(status, 32) AS status, LEFT(assignee_name, 120) AS assignee_name,
+                LEFT(priority, 32) AS priority, due_date, days_overdue, updated_at
          FROM assistant_reporting.overdue_tasks
          WHERE ($1::text IS NULL OR department = $1)
          ORDER BY

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config/env.js";
+import { databaseTlsFromEnvironment } from "../src/config/database-tls.js";
 
 const baseEnvironment = {
   DATABASE_URL: "postgresql://user:pass@localhost:5432/app",
@@ -12,8 +13,16 @@ describe("application configuration", () => {
   it("requires an OpenAI key only when the LLM is enabled", () => {
     expect(() => loadConfig({ ...baseEnvironment, LLM_ENABLED: "true" })).toThrow("OPENAI_API_KEY");
     expect(
-      loadConfig({ ...baseEnvironment, LLM_ENABLED: "true", OPENAI_API_KEY: "test-key" }).llm.enabled
+      loadConfig({
+        ...baseEnvironment,
+        LLM_ENABLED: "true",
+        OPENAI_API_KEY: "test-key",
+        SAFETY_IDENTIFIER_SECRET: "s".repeat(32)
+      }).llm.enabled
     ).toBe(true);
+    expect(() =>
+      loadConfig({ ...baseEnvironment, LLM_ENABLED: "true", OPENAI_API_KEY: "test-key" })
+    ).toThrow("SAFETY_IDENTIFIER_SECRET");
     expect(loadConfig(baseEnvironment).llm.enabled).toBe(false);
   });
 
@@ -22,19 +31,29 @@ describe("application configuration", () => {
       "DATA_ENCRYPTION_KEYS"
     );
 
-    const key = Buffer.alloc(32, 7).toString("base64");
+    const encryptionKey = Buffer.from(Array.from({ length: 32 }, (_, index) => index + 1)).toString("base64");
+    const identifierKey = Buffer.from(Array.from({ length: 32 }, (_, index) => index + 33)).toString("base64");
+    const auditKey = Buffer.from(Array.from({ length: 32 }, (_, index) => 255 - index)).toString("base64");
     const loaded = loadConfig({
       ...baseEnvironment,
       NODE_ENV: "production",
-      PHONE_HASH_SECRET: "0123456789abcdefghijklmnopqrstuvwxyzABCDEF",
+      PHONE_HASH_SECRET: undefined,
+      DATABASE_SSL_MODE: "verify-full",
+      COMPANY_DATABASE_SSL_MODE: "verify-full",
+      IDENTIFIER_HASH_ACTIVE_KEY_ID: "current",
+      IDENTIFIER_HASH_KEYS: JSON.stringify({ current: identifierKey }),
+      AUDIT_INTEGRITY_ACTIVE_KEY_ID: "current",
+      AUDIT_INTEGRITY_KEYS: JSON.stringify({ current: auditKey }),
       DATA_ENCRYPTION_ACTIVE_KEY_ID: "current",
-      DATA_ENCRYPTION_KEYS: JSON.stringify({ current: key })
+      DATA_ENCRYPTION_KEYS: JSON.stringify({ current: encryptionKey })
     });
     expect(loaded.dataEncryption?.activeKeyId).toBe("current");
     expect(loaded.messageRetentionDays).toBe(30);
     expect(loaded.messageRecordRetentionDays).toBe(90);
     expect(loaded.auditRetentionDays).toBe(365);
     expect(loaded.messageWorkerConcurrency).toBe(4);
+    expect(loaded.databaseTls).toMatchObject({ rejectUnauthorized: true });
+    expect(loaded.identifierHash.activeKeyId).toBe("current");
   });
 
   it("rejects record retention shorter than encrypted content retention", () => {
@@ -47,9 +66,50 @@ describe("application configuration", () => {
     ).toThrow("Message record retention");
   });
 
+  it("treats blank optional secret-file settings as unset", () => {
+    expect(
+      loadConfig({
+        ...baseEnvironment,
+        DATABASE_CA_CERT_FILE: "",
+        COMPANY_DATABASE_CA_CERT_FILE: "",
+        DATA_ENCRYPTION_KEYS_FILE: "",
+        IDENTIFIER_HASH_KEYS_FILE: "",
+        AUDIT_INTEGRITY_KEYS_FILE: ""
+      }).nodeEnv
+    ).toBe("development");
+  });
+
   it("rejects non-PostgreSQL connection URLs", () => {
     expect(() => loadConfig({ ...baseEnvironment, DATABASE_URL: "https://example.com/database" })).toThrow(
       "PostgreSQL"
     );
+  });
+
+  it("rejects cross-purpose key reuse and connection-string session overrides in production", () => {
+    const shared = Buffer.from(Array.from({ length: 32 }, (_, index) => index + 1)).toString("base64");
+    const audit = Buffer.from(Array.from({ length: 32 }, (_, index) => 255 - index)).toString("base64");
+    expect(() =>
+      loadConfig({
+        ...baseEnvironment,
+        NODE_ENV: "production",
+        PHONE_HASH_SECRET: undefined,
+        DATABASE_SSL_MODE: "verify-full",
+        COMPANY_DATABASE_SSL_MODE: "verify-full",
+        IDENTIFIER_HASH_ACTIVE_KEY_ID: "current",
+        IDENTIFIER_HASH_KEYS: JSON.stringify({ current: shared }),
+        AUDIT_INTEGRITY_ACTIVE_KEY_ID: "current",
+        AUDIT_INTEGRITY_KEYS: JSON.stringify({ current: audit }),
+        DATA_ENCRYPTION_ACTIVE_KEY_ID: "current",
+        DATA_ENCRYPTION_KEYS: JSON.stringify({ current: shared })
+      })
+    ).toThrow("must not be reused");
+
+    expect(() =>
+      loadConfig({ ...baseEnvironment, DATABASE_URL: `${baseEnvironment.DATABASE_URL}?options=-c%20search_path%3Devil` })
+    ).toThrow("session parameters");
+    expect(() =>
+      loadConfig({ ...baseEnvironment, DATABASE_URL: `${baseEnvironment.DATABASE_URL}?SSLMODE=no-verify` })
+    ).toThrow("inline TLS");
+    expect(() => databaseTlsFromEnvironment({ NODE_ENV: "production" })).toThrow("verify-full");
   });
 });

@@ -9,6 +9,10 @@ const sensitiveKeys = new Set([
   "phonehashsecret",
   "dataencryptionkeys",
   "dataencryptionactivekeyid",
+  "identifierhashkeys",
+  "auditintegritykeys",
+  "safetyidentifiersecret",
+  "ciphertext",
   "token",
   "verifytoken",
   "accesstoken",
@@ -24,7 +28,12 @@ const sensitiveKeys = new Set([
   "content",
   "text",
   "body",
-  "rawbody"
+  "rawbody",
+  "userid",
+  "messageid",
+  "senderreference",
+  "userreference",
+  "messagereference"
 ]);
 
 const emailPattern = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
@@ -61,10 +70,11 @@ export function sanitizeForLogs(value: unknown, seen = new WeakSet<object>()): u
   if (value === null || typeof value !== "object") return value;
   if (Buffer.isBuffer(value) || value instanceof Uint8Array) return "[REDACTED_BINARY]";
   if (value instanceof Error) {
+    const production = process.env.NODE_ENV === "production";
     return {
       name: value.name,
-      message: redactString(value.message),
-      stack: process.env.NODE_ENV === "production" ? undefined : value.stack ? redactString(value.stack) : undefined
+      message: production ? REDACTED : redactString(value.message),
+      stack: production ? undefined : value.stack ? redactString(value.stack) : undefined
     };
   }
   if (seen.has(value)) return "[CIRCULAR]";

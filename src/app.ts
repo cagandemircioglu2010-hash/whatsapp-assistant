@@ -19,6 +19,10 @@ import { WhatsAppClient } from "./whatsapp/client.js";
 import { registerWhatsAppRoutes } from "./whatsapp/routes.js";
 import { EnvelopeEncryption } from "./security/encryption.js";
 import { logSafe } from "./logging/logger.js";
+import { VersionedHmac } from "./security/keyed-hash.js";
+import { PostgresRateLimitStore } from "./security/rate-limiter.js";
+import { runDataLifecycleJob } from "./security/data-lifecycle.js";
+import { readRuntimeHealth } from "./db/readiness.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -43,6 +47,7 @@ export async function buildApp(dependencies: AppDependencies) {
     connectionTimeout: 10_000,
     keepAliveTimeout: 72_000
   });
+  const shutdownTasks: Array<() => Promise<void>> = [];
 
   app.removeContentTypeParser("application/json");
   app.addContentTypeParser("application/json", { parseAs: "buffer" }, (request, body, done) => {
@@ -89,14 +94,13 @@ export async function buildApp(dependencies: AppDependencies) {
   const encryption = dependencies.config.dataEncryption
     ? new EnvelopeEncryption(dependencies.config.dataEncryption)
     : null;
-  const users = new UserRepository(dependencies.appPool, dependencies.config.phoneHashSecret, encryption);
+  const identifiers = new VersionedHmac(dependencies.config.identifierHash);
+  const auditIntegrity = new VersionedHmac(dependencies.config.auditIntegrity);
+  const rateLimits = new PostgresRateLimitStore(dependencies.appPool);
+  const users = new UserRepository(dependencies.appPool, identifiers, encryption);
   const permissions = new PermissionRepository(dependencies.appPool);
-  const messages = new MessageRepository(
-    dependencies.appPool,
-    encryption,
-    dependencies.config.phoneHashSecret
-  );
-  const audit = new AuditRepository(dependencies.appPool);
+  const messages = new MessageRepository(dependencies.appPool, encryption, identifiers);
+  const audit = new AuditRepository(dependencies.appPool, auditIntegrity);
   const reports = new CompanyReportRepository(dependencies.companyReadonlyPool);
   const authorization = new AuthorizationService(permissions);
   const router = new ReportCommandRouter(reports, authorization, dependencies.config.companyTimezone);
@@ -114,7 +118,7 @@ export async function buildApp(dependencies: AppDependencies) {
     const llmAssistant = new CompanyLlmAssistant({
       gateway,
       sessions: mcpSessions,
-      safetyIdentifierSecret: dependencies.config.phoneHashSecret,
+      safetyIdentifierSecret: dependencies.config.safetyIdentifierSecret!,
       timezone: dependencies.config.companyTimezone,
       maxToolCalls: dependencies.config.llm.maxToolCalls
     });
@@ -134,12 +138,27 @@ export async function buildApp(dependencies: AppDependencies) {
       router: responder,
       sender,
       logger: dependencies.logger,
-      phoneHashSecret: dependencies.config.phoneHashSecret,
+      identifiers,
+      rateLimits,
       defaultCountry: dependencies.config.defaultPhoneCountry,
       rateLimitPerMinute: dependencies.config.userRateLimitPerMinute,
+      ingressSenderRateLimitPerMinute: dependencies.config.ingressSenderRateLimitPerMinute,
+      ingressGlobalRateLimitPerMinute: dependencies.config.ingressGlobalRateLimitPerMinute,
       workerConcurrency: dependencies.config.messageWorkerConcurrency
     });
-    await registerWhatsAppRoutes(app, { config: dependencies.config.whatsapp, processor });
+    await registerWhatsAppRoutes(app, {
+      config: dependencies.config.whatsapp,
+      processor,
+      isDecommissioned: async () => {
+        const state = await dependencies.appPool.query<{ decommissioned: boolean }>(
+          `SELECT COALESCE(
+             (SELECT decommissioned_at IS NOT NULL FROM service_state WHERE singleton = TRUE),
+             FALSE
+           ) AS decommissioned`
+        );
+        return state.rows[0]?.decommissioned === true;
+      }
+    });
 
     let recoveryRunning = false;
     let recoveryPromise: Promise<void> | null = null;
@@ -168,7 +187,7 @@ export async function buildApp(dependencies: AppDependencies) {
     setImmediate(scheduleRecovery);
     const recoveryTimer = setInterval(scheduleRecovery, 10_000);
     recoveryTimer.unref();
-    app.addHook("onClose", async () => {
+    shutdownTasks.push(async () => {
       clearInterval(recoveryTimer);
       await recoveryPromise;
       const idle = await processor.waitForIdle();
@@ -187,11 +206,27 @@ export async function buildApp(dependencies: AppDependencies) {
 
   app.get("/health", async (_request, reply) => {
     try {
-      await Promise.all([
-        dependencies.appPool.query("SELECT 1"),
-        dependencies.companyReadonlyPool.query("SELECT 1")
-      ]);
-      return reply.send({ status: "ok" });
+      const health = await readRuntimeHealth(
+        dependencies.appPool,
+        dependencies.companyReadonlyPool,
+        dependencies.config.dataLifecycleIntervalMinutes
+      );
+      const healthy =
+        health.schemaReady &&
+        health.serviceActive &&
+        health.lifecycleHealthy &&
+        health.companyViewsReady &&
+        health.pendingMessages < 5_000;
+      return reply.code(healthy ? 200 : 503).send({
+        status: healthy ? "ok" : "unhealthy",
+        checks: {
+          schema: health.schemaReady,
+          service: health.serviceActive,
+          lifecycle: health.lifecycleHealthy,
+          reporting: health.companyViewsReady,
+          queue: health.pendingMessages < 5_000
+        }
+      });
     } catch {
       return reply.code(503).send({ status: "unhealthy" });
     }
@@ -199,22 +234,57 @@ export async function buildApp(dependencies: AppDependencies) {
 
   app.get("/health/live", async (_request, reply) => reply.send({ status: "ok" }));
 
-  if (encryption) {
-    const runRetention = async () => {
+  if (dependencies.config.nodeEnv !== "test") {
+    let lifecyclePromise: Promise<void> | null = null;
+    const runRetention = () => {
+      if (lifecyclePromise) return;
+      lifecyclePromise = (async () => {
       try {
-        const purged = await messages.purgeExpiredContent(dependencies.config.messageRetentionDays);
-        if (purged > 0) {
-          logSafe(dependencies.logger, "info", { purged }, "Expired message content was purged");
+        const purged = await runDataLifecycleJob(dependencies.appPool, {
+          contentDays: dependencies.config.messageRetentionDays,
+          messageRecordDays: dependencies.config.messageRecordRetentionDays,
+          auditDays: dependencies.config.auditRetentionDays
+        });
+        if (purged) {
+          logSafe(dependencies.logger, "info", { ...purged }, "Data lifecycle maintenance completed");
         }
       } catch (error) {
-        logSafe(dependencies.logger, "error", { error }, "Message retention cleanup failed");
+        logSafe(dependencies.logger, "error", { error }, "Data lifecycle maintenance failed");
+      } finally {
+        lifecyclePromise = null;
       }
+      })();
     };
-    await runRetention();
-    const retentionTimer = setInterval(() => void runRetention(), 6 * 60 * 60 * 1000);
+    setImmediate(runRetention);
+    const retentionTimer = setInterval(
+      runRetention,
+      dependencies.config.dataLifecycleIntervalMinutes * 60 * 1000
+    );
     retentionTimer.unref();
-    app.addHook("onClose", async () => clearInterval(retentionTimer));
+    shutdownTasks.push(async () => {
+      clearInterval(retentionTimer);
+      await lifecyclePromise;
+    });
   }
+
+  app.addHook("onClose", async () => {
+    try {
+      for (const task of shutdownTasks) {
+        try {
+          await task();
+        } catch (error) {
+          logSafe(dependencies.logger, "error", { error }, "Application shutdown task failed");
+        }
+      }
+    } finally {
+      encryption?.destroy();
+      identifiers.destroy();
+      auditIntegrity.destroy();
+      for (const key of dependencies.config.dataEncryption?.keys.values() ?? []) key.fill(0);
+      for (const key of dependencies.config.identifierHash.keys.values()) key.fill(0);
+      for (const key of dependencies.config.auditIntegrity.keys.values()) key.fill(0);
+    }
+  });
 
   return app;
 }

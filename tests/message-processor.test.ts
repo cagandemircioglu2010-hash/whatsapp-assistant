@@ -15,6 +15,8 @@ import type { CompanyReports } from "../src/reports/company-report.repository.js
 import { ReportCommandRouter } from "../src/reports/report-command-router.js";
 import type { WhatsAppSender } from "../src/whatsapp/types.js";
 import { WhatsAppDeliveryUncertainError } from "../src/whatsapp/client.js";
+import { legacyHmacKeyRing, VersionedHmac } from "../src/security/keyed-hash.js";
+import { InMemoryRateLimitStore } from "../src/security/rate-limiter.js";
 
 class MemoryMessages implements MessageStore {
   inbound: SaveInboundInput[] = [];
@@ -72,9 +74,12 @@ function processor(
     sender,
     router: new ReportCommandRouter(reports, new AuthorizationService(permissions), "Europe/Istanbul"),
     logger: createLogger("silent"),
-    phoneHashSecret: "x".repeat(32),
+    identifiers: new VersionedHmac(legacyHmacKeyRing("x".repeat(32))),
+    rateLimits: new InMemoryRateLimitStore(),
     defaultCountry: "TR",
-    rateLimitPerMinute
+    rateLimitPerMinute,
+    ingressSenderRateLimitPerMinute: 1_000,
+    ingressGlobalRateLimitPerMinute: 10_000
   });
 }
 
@@ -92,8 +97,8 @@ describe("message processor", () => {
     });
 
     expect(result).toBe("unauthorized");
-    expect(messages.inbound[0]?.content).toBeNull();
-    expect(messages.statuses).toEqual(["ignored"]);
+    expect(messages.inbound).toHaveLength(0);
+    expect(messages.statuses).toEqual([]);
     expect(sender.calls).toHaveLength(0);
     expect(audit.events[0]?.outcome).toBe("denied");
   });
@@ -105,7 +110,6 @@ describe("message processor", () => {
     const users: UserLookup = {
       findActiveByPhone: async () => ({
         id: "user-1",
-        fullName: "Test User",
         department: "Sales",
         role: "employee"
       })
@@ -132,7 +136,6 @@ describe("message processor", () => {
     const users: UserLookup = {
       findActiveByPhone: async () => ({
         id: "rate-user",
-        fullName: "Rate User",
         department: "Sales",
         role: "employee"
       })
@@ -169,7 +172,6 @@ describe("message processor", () => {
     const users: UserLookup = {
       findActiveByPhone: async () => ({
         id: "user-1",
-        fullName: "Test User",
         department: "Sales",
         role: "employee"
       })

@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
-const ENVELOPE_VERSION = "v1";
+const LEGACY_ENVELOPE_VERSION = "v1";
+const ENVELOPE_VERSION = "v2";
 const KEY_ID_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]*$/;
@@ -46,17 +47,28 @@ export function parseDataEncryptionConfig(keysJson: string, activeKeyId: string)
   }
 
   const keys = new Map<string, Buffer>();
+  const fingerprints = new Set<string>();
   for (const [keyId, encodedKey] of entries) {
     if (!KEY_ID_PATTERN.test(keyId)) throw new Error("An encryption key id is invalid");
-    keys.set(keyId, decodeKey(encodedKey));
+    const key = decodeKey(encodedKey);
+    const fingerprint = key.toString("base64");
+    if (fingerprints.has(fingerprint)) throw new Error("Encryption key values must be unique");
+    fingerprints.add(fingerprint);
+    keys.set(keyId, key);
   }
   if (!keys.has(activeKeyId)) throw new Error("The active encryption key id is missing from the key ring");
   return { activeKeyId, keys };
 }
 
-function aad(version: string, purpose: string, keyId: string): Buffer {
+function aad(version: string, purpose: string, keyId: string, recordBinding?: string): Buffer {
   if (!/^[a-z][a-z0-9_.-]{2,63}$/.test(purpose)) throw new Error("Encryption purpose is invalid");
-  return Buffer.from(`${version}\u0000${purpose}\u0000${keyId}`, "utf8");
+  if (version === ENVELOPE_VERSION && !recordBinding) throw new Error("Encryption record binding is required");
+  return Buffer.from(
+    version === LEGACY_ENVELOPE_VERSION
+      ? `${version}\u0000${purpose}\u0000${keyId}`
+      : `${version}\u0000${purpose}\u0000${keyId}\u0000${recordBinding}`,
+    "utf8"
+  );
 }
 
 function decodeEnvelopePart(value: string, expectedBytes?: number): Buffer {
@@ -70,16 +82,25 @@ function decodeEnvelopePart(value: string, expectedBytes?: number): Buffer {
 }
 
 export class EnvelopeEncryption {
-  constructor(private readonly config: DataEncryptionConfig) {}
+  readonly activeKeyId: string;
+  private readonly config: DataEncryptionConfig;
 
-  encrypt(plaintext: string, purpose: string): EncryptedValue {
+  constructor(config: DataEncryptionConfig) {
+    this.activeKeyId = config.activeKeyId;
+    this.config = {
+      activeKeyId: config.activeKeyId,
+      keys: new Map([...config.keys].map(([id, key]) => [id, Buffer.from(key)]))
+    };
+  }
+
+  encrypt(plaintext: string, purpose: string, recordBinding: string): EncryptedValue {
     const keyId = this.config.activeKeyId;
     const key = this.config.keys.get(keyId);
     if (!key) throw new Error("Active encryption key is unavailable");
 
     const iv = randomBytes(12);
     const cipher = createCipheriv("aes-256-gcm", key, iv);
-    cipher.setAAD(aad(ENVELOPE_VERSION, purpose, keyId));
+    cipher.setAAD(aad(ENVELOPE_VERSION, purpose, keyId, recordBinding));
     const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
     const tag = cipher.getAuthTag();
     return {
@@ -94,14 +115,18 @@ export class EnvelopeEncryption {
     };
   }
 
-  decrypt(envelope: string, purpose: string): string {
+  decrypt(envelope: string, purpose: string, recordBinding: string): string {
     if (Buffer.byteLength(envelope, "utf8") > MAX_ENVELOPE_BYTES) {
       throw new Error("Encrypted value is too large");
     }
     const parts = envelope.split(".");
     if (parts.length !== 5) throw new Error("Encrypted value is malformed");
     const [version, keyId, encodedIv, encodedCiphertext, encodedTag] = parts;
-    if (version !== ENVELOPE_VERSION || !keyId || !KEY_ID_PATTERN.test(keyId)) {
+    if (
+      (version !== ENVELOPE_VERSION && version !== LEGACY_ENVELOPE_VERSION) ||
+      !keyId ||
+      !KEY_ID_PATTERN.test(keyId)
+    ) {
       throw new Error("Encrypted value is malformed");
     }
     const key = this.config.keys.get(keyId);
@@ -112,11 +137,19 @@ export class EnvelopeEncryption {
     const tag = decodeEnvelopePart(encodedTag ?? "", 16);
     try {
       const decipher = createDecipheriv("aes-256-gcm", key, iv);
-      decipher.setAAD(aad(version, purpose, keyId));
+      decipher.setAAD(aad(version, purpose, keyId, recordBinding));
       decipher.setAuthTag(tag);
       return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8");
     } catch {
       throw new Error("Encrypted value failed authentication");
     }
+  }
+
+  isCurrentEnvelope(envelope: string, keyId = this.config.activeKeyId): boolean {
+    return envelope.startsWith(`${ENVELOPE_VERSION}.${keyId}.`);
+  }
+
+  destroy(): void {
+    for (const key of this.config.keys.values()) key.fill(0);
   }
 }

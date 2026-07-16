@@ -1,20 +1,27 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { hashPhoneIdentifier, normalizePhoneNumber, phoneLastFour } from "../src/security/phone.js";
+import { normalizePhoneNumber } from "../src/security/phone.js";
+import { parseHmacKeyRing, VersionedHmac } from "../src/security/keyed-hash.js";
 import { redactString, sanitizeForLogs } from "../src/security/redact.js";
 import { verifyMetaSignature } from "../src/whatsapp/signature.js";
 
 describe("phone security", () => {
   it("normalizes Turkish phone numbers to E.164", () => {
     expect(normalizePhoneNumber("0555 123 45 67", "TR")).toBe("+905551234567");
-    expect(phoneLastFour("+905551234567")).toBe("4567");
   });
 
-  it("creates deterministic non-plaintext phone hashes", () => {
-    const hash = hashPhoneIdentifier("+905551234567", "a".repeat(32));
-    expect(hash).toHaveLength(64);
-    expect(hash).not.toContain("5551234567");
-    expect(hash).toBe(hashPhoneIdentifier("+905551234567", "a".repeat(32)));
+  it("supports ordered HMAC key rotation without accepting duplicate key material", () => {
+    const current = Buffer.alloc(32, 7).toString("base64");
+    const old = Buffer.alloc(32, 8).toString("base64");
+    const hmac = new VersionedHmac(
+      parseHmacKeyRing(JSON.stringify({ old, current }), "current")
+    );
+    const candidates = hmac.candidates("+905551234567", "phone-identifier");
+    expect(candidates.map((candidate) => candidate.keyId)).toEqual(["current", "old"]);
+    expect(hmac.verify("+905551234567", "phone-identifier", candidates[1]!.hash, "old")).toBe(true);
+    expect(() =>
+      parseHmacKeyRing(JSON.stringify({ current, duplicate: current }), "current")
+    ).toThrow("unique");
   });
 });
 
@@ -32,7 +39,7 @@ describe("log redaction", () => {
     });
 
     expect(result).toEqual({
-      messageId: "wamid.123",
+      messageId: "[REDACTED]",
       phoneNumber: "[REDACTED]",
       nested: {
         content: "[REDACTED]",

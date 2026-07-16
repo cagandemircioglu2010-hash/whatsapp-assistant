@@ -16,13 +16,20 @@ export function createLogger(level: string): Logger {
         "*.appSecret",
         "*.phoneHashSecret",
         "*.dataEncryptionKeys",
+        "*.identifierHashKeys",
+        "*.auditIntegrityKeys",
+        "*.safetyIdentifierSecret",
+        "*.ciphertext",
         "*.databaseUrl",
         "*.phone",
         "*.phoneNumber",
         "*.content",
         "*.text",
         "*.body",
-        "*.rawBody"
+        "*.rawBody",
+        "*.userId",
+        "*.messageId",
+        "*.senderReference"
       ],
       censor: "[REDACTED]"
     }

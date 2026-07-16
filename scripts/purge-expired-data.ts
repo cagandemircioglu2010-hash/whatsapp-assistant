@@ -1,6 +1,7 @@
 import "dotenv/config";
 import pg from "pg";
-import { purgeExpiredData } from "../src/security/data-lifecycle.js";
+import { runDataLifecycleJob } from "../src/security/data-lifecycle.js";
+import { assertSafePostgresUrl, databaseTlsFromEnvironment } from "../src/config/database-tls.js";
 
 const { Pool } = pg;
 
@@ -16,6 +17,7 @@ function retentionDays(name: string, fallback: number, maximum: number): number 
 
 const databaseUrl = process.env.DATABASE_ADMIN_URL;
 if (!databaseUrl) throw new Error("DATABASE_ADMIN_URL must be set");
+assertSafePostgresUrl(databaseUrl);
 
 const contentDays = retentionDays("MESSAGE_RETENTION_DAYS", 30, 365);
 const recordDays = retentionDays("MESSAGE_RECORD_RETENTION_DAYS", 90, 3650);
@@ -24,34 +26,25 @@ if (recordDays < contentDays) {
   throw new Error("MESSAGE_RECORD_RETENTION_DAYS cannot be shorter than MESSAGE_RETENTION_DAYS");
 }
 
-const ssl = process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: true } : false;
+const ssl = databaseTlsFromEnvironment(process.env);
 const pool = new Pool({ connectionString: databaseUrl, ssl, max: 1 });
-const client = await pool.connect();
-
 try {
-  await client.query("BEGIN");
-  await client.query("SET LOCAL lock_timeout = '10s'");
-  await client.query("SET LOCAL statement_timeout = '5min'");
-  await client.query(
-    "SELECT pg_advisory_xact_lock(hashtext('company-whatsapp-assistant.data-lifecycle'))"
-  );
-
-  const result = await purgeExpiredData(client, {
+  const result = await runDataLifecycleJob(pool, {
     contentDays,
     messageRecordDays: recordDays,
     auditDays
   });
-
-  await client.query("COMMIT");
-  process.stdout.write(
-    `Lifecycle purge completed: ${result.contentMinimized} content record(s) minimized, ` +
-      `${result.messagesDeleted} terminal message record(s) deleted, ` +
-      `${result.auditEventsDeleted} audit record(s) deleted.\n`
-  );
-} catch (error) {
-  await client.query("ROLLBACK").catch(() => undefined);
-  throw error;
+  if (!result) throw new Error("Lifecycle purge was skipped because another instance holds the lock");
+  if (result.legalHold) {
+    process.stdout.write("Lifecycle purge skipped because an approved legal hold is active.\n");
+  } else {
+    process.stdout.write(
+      `Lifecycle purge completed: ${result.contentMinimized} content record(s) minimized, ` +
+        `${result.messagesDeleted} terminal message record(s) deleted, ` +
+        `${result.auditEventsDeleted} audit record(s) deleted, and ` +
+        `${result.rateLimitBucketsDeleted} expired rate-limit bucket(s) deleted.\n`
+    );
+  }
 } finally {
-  client.release();
   await pool.end();
 }

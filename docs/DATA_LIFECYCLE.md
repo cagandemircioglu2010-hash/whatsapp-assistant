@@ -1,77 +1,142 @@
-# Data lifecycle and client offboarding
+# Data lifecycle and verified offboarding
 
-This runbook covers data written by the WhatsApp assistant. It does not authorize deletion of the client's source
-company database. Agree the actual retention values, legal holds, backup windows, and evidence owner with the client
-before production use.
+Agree retention, legal holds, backup windows, data residency, subprocessors, evidence owner, and source-data ownership
+with the client before production use. A legal hold overrides automated deletion until formally released.
 
-## Stored-data map
+## Data map
 
-| Data | Protection | Default lifetime | Deletion path |
+| Data | Protection | Default lifetime | Deletion |
 |---|---|---:|---|
-| Phone number | AES-256-GCM; HMAC lookup index | While user is whitelisted | Client offboarding |
-| Name and department | AES-256-GCM | While user is whitelisted | Client offboarding |
-| Authorized message body | AES-256-GCM | 30 days | Runtime minimizer or admin purge |
-| Unauthorized message body | Not stored | 0 days | Not applicable |
-| WhatsApp message ID | Domain-separated HMAC only | With message record | Message-record purge |
-| Terminal message record and phone HMAC | Pseudonymous identifiers; no body after content expiry | 90 days | Admin purge |
-| Audit event | No message body or raw phone | 365 days | Admin purge |
-| Company reporting source | Read-only access; not copied as source rows | Client-controlled | Client-owned process |
+| Phone, name, department | Record-bound AES-256-GCM v2; versioned phone HMAC | While whitelisted | User/client erasure |
+| Authorized message body | Record-bound AES-256-GCM v2 | 30 days | Automatic minimizer |
+| Unauthorized message/body | Not persisted | 0 days | Not applicable |
+| WhatsApp message ID | Versioned HMAC only | Message-record lifetime | Automatic record purge |
+| Terminal message metadata | Keyed pseudonymous identifiers | 90 days | Automatic record purge |
+| Audit event | HMAC chain; no raw phone/body | 365 days | Prefix purge + retained anchor |
+| Rate-limit bucket | Keyed subject hash | About 2 minutes | Automatic cleanup |
+| Reporting source | View-only; source rows not copied | Client policy | Separate written authorization |
 
-Set `MESSAGE_RETENTION_DAYS`, `MESSAGE_RECORD_RETENTION_DAYS`, and `AUDIT_RETENTION_DAYS` to the approved values.
-Message-record retention cannot be shorter than content retention. Use a separate key ring and HMAC secret for every
-client; keep them outside Git, images, logs, and database backups.
+Keys are not database data. They must be unique per client and stored outside Git, images, logs, DB snapshots, and
+ordinary application configuration exports.
 
-## Scheduled lifecycle purge
+## Automatic lifecycle
 
-Run this command daily from a restricted administrative cron/job with `DATABASE_ADMIN_URL` supplied only to that job:
+The runtime calls `assistant_run_data_lifecycle` at `DATA_LIFECYCLE_INTERVAL_MINUTES`. The function:
+
+1. acquires a distributed advisory lock;
+2. removes expired ciphertext and temporary metadata;
+3. anchors and removes only a contiguous expired audit prefix;
+4. deletes expired terminal message records while preserving active/retryable work;
+5. deletes expired rate-limit buckets;
+6. records a heartbeat and non-sensitive row counts.
+
+An approved legal hold is persisted in `service_state` and checked under the same advisory lock before any deletion.
+It also blocks individual and end-of-contract erasure until formally released. Use only a non-PII approval ticket:
+
+```bash
+npm run db:set-legal-hold -- --active true --reference LEGAL-2026-001
+npm run db:set-legal-hold -- --active true --reference LEGAL-2026-001 \
+  --confirm-database <exact-app-database-name> --confirm-legal-hold-change
+
+npm run db:set-legal-hold -- --active false --reference RELEASE-2026-001 \
+  --confirm-database <exact-app-database-name> --confirm-legal-hold-change --confirm-retention-resumes
+```
+
+It is `SECURITY DEFINER`, has a fixed search path, validates all retention values, and is revoked from `PUBLIC`.
+The runtime role receives only `EXECUTE`; it does not receive message/audit `DELETE`.
+
+Monitor `/health` and `maintenance_job_state.last_succeeded_at`. An optional manual trigger uses the same lock and
+heartbeat:
 
 ```bash
 npm run db:purge-expired
 ```
 
-The command takes a transaction-scoped advisory lock, clears expired body/metadata, deletes only terminal message
-records, and deletes expired audit events. It deliberately preserves active/retryable inbound and outbound work.
-The application runtime role remains unable to delete audit or message records.
+Verify the audit chain periodically and before/after sensitive administration:
 
-Monitor the job exit status and row counts without copying database URLs, phone numbers, message bodies, ciphertext,
-or keys into monitoring labels. Review retention values whenever the contract, data classification, or legal-hold
-status changes.
+```bash
+npm run db:verify-audit
+```
 
-## End-of-contract erasure
+The verifier prints the authenticated tail sequence and hash. Forward that non-PII checkpoint and command result to
+an access-controlled append-only/WORM monitoring system. A database-local chain detects modification, but an external
+checkpoint is required to detect total deletion of the database, events, anchors, and state together.
 
-1. Record the approved client/environment and confirm there is no active legal hold.
-2. Disable the Meta webhook and stop every application/worker instance so no new rows can be created.
-3. Point `DATABASE_ADMIN_URL` at the dedicated assistant database and run the non-mutating inventory:
+## Individual erasure
+
+1. Verify requester identity and authority outside the bot.
+2. Confirm no applicable legal hold.
+3. Run dry-run and record only its pseudonymous reference/counts:
+
+   ```bash
+   npm run db:erase-user-data -- --phone "+905551234567"
+   ```
+
+4. Stop every application/worker replica so no in-flight job can recreate or transmit data, then supply the exact
+   reference and service-stop confirmation:
+
+   ```bash
+   npm run db:erase-user-data -- \
+     --phone "+905551234567" \
+     --confirm-reference <reference> \
+     --confirm-service-stopped \
+     --confirm-erase-user-data
+   ```
+
+5. Verify user, permission, message and subject-specific rate-limit rows are absent.
+
+Audit FK links are nulled by PostgreSQL. Stable keyed references, rather than mutable FKs, are authenticated by the
+audit chain, so erasure does not invalidate audit evidence or retain raw PII. Those references remain pseudonymous
+personal data while the audit keys exist; retain them only under the approved audit purpose, legal basis, and lifetime.
+
+## End-of-contract assistant erasure
+
+1. Record approval, environment, legal-hold release, operators and expected provider scope.
+2. Disable the Meta webhook and stop every application/worker replica.
+3. Run dry-run against the dedicated assistant DB:
 
    ```bash
    npm run db:erase-client-data
    ```
 
-4. Compare the displayed database name with the approved environment. Then execute the guarded erasure:
+4. Compare the displayed DB name with the approved environment and execute:
 
    ```bash
    npm run db:erase-client-data -- \
      --confirm-database <exact-database-name> \
+     --confirm-service-stopped \
+     --confirm-provider-webhook-disabled \
      --confirm-erase-client-data
    ```
 
-5. Verify the command reports all four application tables empty. Do not restart the service.
-6. Revoke/delete Meta and OpenAI tokens, database users/passwords, deploy keys, webhook secrets, and service access.
-7. Destroy `DATA_ENCRYPTION_KEYS` and `PHONE_HASH_SECRET` in every secret manager and deployment revision.
-8. Delete the dedicated assistant database/service, application instances, persistent disks, logs, exports, snapshots,
-   point-in-time recovery/WAL data, and backups through each provider. Wait for documented provider expiry where
-   immediate deletion is unavailable.
-9. Confirm ownership of the source company/reporting database with the client. This repository's erasure command never
-   modifies it.
-10. Store only non-PII evidence: client/environment reference, approver, operator, timestamps, command exit status,
-    zero-row verification, provider deletion ticket IDs, and the final backup-expiry date.
+5. Verify all reported assistant-owned counts are zero and `service_state.decommissioned_at` is non-null. Startup and
+   webhook paths fail closed after this marker is committed.
+6. Revoke/delete Meta/OpenAI tokens, DB roles/passwords, deploy keys, webhook secrets and all application key rings.
+7. Delete instances, disks, DB/service, replicas, exports, logs, snapshots, PITR/WAL and backups. Where deletion is
+   deferred, record the provider's final expiry date and ticket.
+8. Verify Meta/OpenAI contractual retention, data-residency and deletion controls separately; application code cannot
+   erase provider-held copies by itself.
 
-SQL `DELETE` is a logical deletion boundary, not a promise of immediate physical overwrite. PostgreSQL documents that
-old row versions remain until vacuum can reclaim them, and backups/WAL are separate copies. For that reason the process
-combines verified row deletion, encryption-key destruction, credential revocation, and provider media/backup disposal.
-Choose sanitization controls proportionate to the client's data sensitivity and the current NIST SP 800-88 guidance.
+## Client-owned reporting source
 
-References:
+Assistant erasure deliberately does not touch source reporting data. If the contract requires source deletion, obtain
+separate written authorization, run dry-run against `COMPANY_DATABASE_ADMIN_URL`, then use all confirmations:
 
-- [PostgreSQL: routine vacuuming and deleted row versions](https://www.postgresql.org/docs/current/routine-vacuuming.html)
-- [NIST SP 800-88 Rev. 2: Guidelines for Media Sanitization](https://csrc.nist.gov/pubs/sp/800/88/r2/final)
+```bash
+npm run db:erase-company-source
+npm run db:erase-company-source -- \
+  --confirm-database <exact-company-database-name> \
+  --confirm-client-authorization \
+  --confirm-erase-company-source-data
+```
+
+Never infer authorization to delete the source from authorization to delete the bot database.
+
+## Evidence
+
+Keep only environment/client references, approvers, operators, UTC timestamps, commit/image digest, command exit
+status, zero-row counts, audit verification result, provider ticket IDs, and final backup expiry. Do not store phone
+numbers, names, message bodies, ciphertext, keys, tokens, URLs with credentials, or database exports as evidence.
+
+SQL `DELETE` is a logical boundary, not immediate media overwrite. PostgreSQL row versions, WAL and backups require
+provider controls and cryptographic erasure through key destruction.

@@ -1,4 +1,4 @@
-import type { PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 
 type Queryable = Pick<PoolClient, "query">;
 
@@ -12,6 +12,8 @@ export type DataLifecyclePurgeResult = {
   contentMinimized: number;
   messagesDeleted: number;
   auditEventsDeleted: number;
+  rateLimitBucketsDeleted: number;
+  legalHold?: boolean;
 };
 
 export type ClientDataCounts = {
@@ -19,75 +21,22 @@ export type ClientDataCounts = {
   permissions: number;
   messages: number;
   audit_events: number;
+  rate_limit_buckets: number;
+  encryption_canaries: number;
+  audit_chain_anchors: number;
 };
 
-function validDays(value: number, maximum: number): boolean {
-  return Number.isSafeInteger(value) && value >= 1 && value <= maximum;
-}
-
-export async function purgeExpiredData(
-  client: Queryable,
+export async function runDataLifecycleJob(
+  pool: Pool,
   policy: DataLifecyclePolicy
-): Promise<DataLifecyclePurgeResult> {
-  if (!validDays(policy.contentDays, 365)) {
-    throw new Error("Content retention must be between 1 and 365 days");
-  }
-  if (!validDays(policy.messageRecordDays, 3650)) {
-    throw new Error("Message record retention must be between 1 and 3650 days");
-  }
-  if (!validDays(policy.auditDays, 3650)) {
-    throw new Error("Audit retention must be between 1 and 3650 days");
-  }
-  if (policy.messageRecordDays < policy.contentDays) {
-    throw new Error("Message record retention cannot be shorter than content retention");
-  }
-
-  const content = await client.query(
-    `UPDATE messages
-     SET content = NULL, content_ciphertext = NULL, content_key_id = NULL,
-         metadata = '{}'::jsonb, updated_at = NOW()
-     WHERE created_at < NOW() - ($1::integer * INTERVAL '1 day')
-       AND (
-         content IS NOT NULL
-         OR content_ciphertext IS NOT NULL
-         OR metadata <> '{}'::jsonb
-       )`,
-    [policy.contentDays]
+): Promise<DataLifecyclePurgeResult | null> {
+  const result = await pool.query<{ result: DataLifecyclePurgeResult | { errorCode: string } | null }>(
+    "SELECT assistant_run_data_lifecycle($1, $2, $3) AS result",
+    [policy.contentDays, policy.messageRecordDays, policy.auditDays]
   );
-
-  const audit = await client.query(
-    `DELETE FROM audit_events
-     WHERE created_at < NOW() - ($1::integer * INTERVAL '1 day')`,
-    [policy.auditDays]
-  );
-
-  const messages = await client.query(
-    `DELETE FROM messages
-     WHERE created_at < NOW() - ($1::integer * INTERVAL '1 day')
-       AND (
-         (
-           direction = 'inbound'
-           AND (
-             status IN ('processed', 'ignored')
-             OR (status = 'failed' AND processing_attempts >= 3)
-           )
-         )
-         OR (
-           direction = 'outbound'
-           AND (
-             status IN ('sent', 'delivery_unknown', 'delivered', 'read')
-             OR (status = 'failed' AND delivery_attempts >= 3)
-           )
-         )
-       )`,
-    [policy.messageRecordDays]
-  );
-
-  return {
-    contentMinimized: content.rowCount ?? 0,
-    messagesDeleted: messages.rowCount ?? 0,
-    auditEventsDeleted: audit.rowCount ?? 0
-  };
+  const value = result.rows[0]?.result ?? null;
+  if (value && "errorCode" in value) throw new Error(`Data lifecycle job failed with SQLSTATE ${value.errorCode}`);
+  return value;
 }
 
 export async function readClientDataCounts(client: Queryable): Promise<ClientDataCounts> {
@@ -96,7 +45,10 @@ export async function readClientDataCounts(client: Queryable): Promise<ClientDat
        (SELECT COUNT(*)::integer FROM users) AS users,
        (SELECT COUNT(*)::integer FROM permissions) AS permissions,
        (SELECT COUNT(*)::integer FROM messages) AS messages,
-       (SELECT COUNT(*)::integer FROM audit_events) AS audit_events`
+       (SELECT COUNT(*)::integer FROM audit_events) AS audit_events,
+       (SELECT COUNT(*)::integer FROM rate_limit_buckets) AS rate_limit_buckets,
+       (SELECT COUNT(*)::integer FROM encryption_canaries) AS encryption_canaries,
+       (SELECT COUNT(*)::integer FROM audit_chain_anchors) AS audit_chain_anchors`
   );
   const row = result.rows[0];
   if (!row) throw new Error("Client data counts could not be read");
@@ -111,9 +63,44 @@ export async function eraseAssistantData(
   await client.query("DELETE FROM messages");
   await client.query("DELETE FROM permissions");
   await client.query("DELETE FROM users");
+  await client.query("DELETE FROM rate_limit_buckets");
+  await client.query("DELETE FROM encryption_canaries");
+  await client.query("DELETE FROM audit_chain_anchors");
+  await client.query("ALTER SEQUENCE audit_events_sequence_seq RESTART WITH 1");
+  await client.query(
+    `UPDATE audit_chain_state
+     SET last_sequence = NULL, last_hash = NULL, updated_at = NOW()
+     WHERE singleton = TRUE`
+  );
+  await client.query(
+    `UPDATE maintenance_job_state
+     SET last_started_at = NULL, last_succeeded_at = NULL,
+         last_result = '{}'::jsonb, consecutive_failures = 0, last_error_code = NULL
+     WHERE job_name = 'data-lifecycle'`
+  );
   const after = await readClientDataCounts(client);
   if (Object.values(after).some((value) => value !== 0)) {
     throw new Error("Client data erasure verification failed");
   }
   return { before, after };
+}
+
+export type UserErasureResult = {
+  userDeleted: boolean;
+  messagesDeleted: number;
+  permissionsDeleted: number;
+};
+
+export async function eraseUserData(
+  client: Queryable,
+  userId: string
+): Promise<UserErasureResult> {
+  const messages = await client.query("DELETE FROM messages WHERE user_id = $1", [userId]);
+  const permissions = await client.query("DELETE FROM permissions WHERE user_id = $1", [userId]);
+  const user = await client.query("DELETE FROM users WHERE id = $1", [userId]);
+  return {
+    userDeleted: user.rowCount === 1,
+    messagesDeleted: messages.rowCount ?? 0,
+    permissionsDeleted: permissions.rowCount ?? 0
+  };
 }

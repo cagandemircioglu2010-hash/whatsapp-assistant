@@ -8,8 +8,9 @@ import type {
 } from "../auth/user.repository.js";
 import type { AuthorizedUser } from "../auth/types.js";
 import { logSafe } from "../logging/logger.js";
-import { hashPhoneIdentifier, normalizePhoneNumber } from "../security/phone.js";
-import { TokenBucketRateLimiter } from "../security/rate-limiter.js";
+import { normalizePhoneNumber } from "../security/phone.js";
+import type { VersionedHash, VersionedHmac } from "../security/keyed-hash.js";
+import type { RateLimitStore } from "../security/rate-limiter.js";
 import { WhatsAppDeliveryUncertainError } from "../whatsapp/client.js";
 import type {
   IncomingWhatsAppMessage,
@@ -44,9 +45,12 @@ type MessageProcessorOptions = {
   router: AssistantResponder;
   sender: WhatsAppSender;
   logger: Logger;
-  phoneHashSecret: string;
+  identifiers: VersionedHmac;
+  rateLimits: RateLimitStore;
   defaultCountry: CountryCode;
   rateLimitPerMinute?: number;
+  ingressSenderRateLimitPerMinute?: number;
+  ingressGlobalRateLimitPerMinute?: number;
   workerConcurrency?: number;
 };
 
@@ -54,7 +58,7 @@ type QueuedMessage = {
   storedId: string;
   user: AuthorizedUser;
   phoneE164: string;
-  phoneHash: string;
+  senderPhone: VersionedHash;
   text: string;
 };
 
@@ -67,21 +71,25 @@ type AcceptedMessage =
   | {
       result: Exclude<
         ProcessingResult,
-        "queued" | "processed" | "rate_limited" | "delivery_unknown" | "failed"
+        "queued" | "processed" | "delivery_unknown" | "failed"
       >;
     }
   | { result: "queued"; queued: QueuedMessage };
 
 export class MessageProcessor {
-  private readonly rateLimiter: TokenBucketRateLimiter;
   private readonly activeTasks = new Set<Promise<void>>();
   private readonly pendingQueue: QueuedWork[] = [];
   private readonly workerConcurrency: number;
   private readonly maxBufferedJobs: number;
+  private readonly userRateLimit: number;
+  private readonly ingressSenderRateLimit: number;
+  private readonly ingressGlobalRateLimit: number;
   private pumpScheduled = false;
 
   constructor(private readonly options: MessageProcessorOptions) {
-    this.rateLimiter = new TokenBucketRateLimiter(options.rateLimitPerMinute ?? 20);
+    this.userRateLimit = options.rateLimitPerMinute ?? 20;
+    this.ingressSenderRateLimit = options.ingressSenderRateLimitPerMinute ?? 10;
+    this.ingressGlobalRateLimit = options.ingressGlobalRateLimitPerMinute ?? 600;
     this.workerConcurrency = options.workerConcurrency ?? 4;
     if (!Number.isInteger(this.workerConcurrency) || this.workerConcurrency < 1 || this.workerConcurrency > 16) {
       throw new Error("Worker concurrency must be between 1 and 16");
@@ -174,6 +182,10 @@ export class MessageProcessor {
   async recordStatus(update: WhatsAppMessageStatus): Promise<void> {
     const updateStatus = this.options.messages.updateOutboundStatus;
     if (!updateStatus) return;
+    const globalSubject = this.options.identifiers.hash("global", "rate-limit-global").hash;
+    if (!(await this.consumeLimit("whatsapp.ingress-global", globalSubject, this.ingressGlobalRateLimit))) {
+      return;
+    }
     const message = await updateStatus.call(
       this.options.messages,
       update.externalMessageId,
@@ -194,7 +206,7 @@ export class MessageProcessor {
       storedId: pending.id,
       user: identity.user,
       phoneE164: identity.phoneE164,
-      phoneHash: pending.senderPhoneHash,
+      senderPhone: { hash: pending.senderPhoneHash, keyId: pending.senderPhoneKeyId },
       text: pending.content ?? ""
     };
   }
@@ -202,35 +214,46 @@ export class MessageProcessor {
   private async accept(incoming: IncomingWhatsAppMessage): Promise<AcceptedMessage> {
     const normalizedPhone = normalizePhoneNumber(incoming.from, this.options.defaultCountry);
     const phoneForHash = normalizedPhone ?? incoming.from;
-    const phoneHash = hashPhoneIdentifier(phoneForHash, this.options.phoneHashSecret);
+    const senderPhone = this.options.identifiers.hash(phoneForHash, "sender-phone");
+    const rateSubject = this.options.identifiers.hash(phoneForHash, "rate-limit-subject").hash;
+    const globalSubject = this.options.identifiers.hash("global", "rate-limit-global").hash;
+    const ingressAllowed = await this.consumeLimit(
+      "whatsapp.ingress-global",
+      globalSubject,
+      this.ingressGlobalRateLimit
+    );
+    const senderAllowed = ingressAllowed
+      ? await this.consumeLimit("whatsapp.ingress-sender", rateSubject, this.ingressSenderRateLimit)
+      : false;
+    if (!ingressAllowed || !senderAllowed) {
+      return { result: "rate_limited" };
+    }
     const user = normalizedPhone ? await this.options.users.findActiveByPhone(normalizedPhone) : null;
 
-    const stored = await this.options.messages.saveInbound({
-      externalMessageId: incoming.externalMessageId,
-      userId: user?.id ?? null,
-      content: user ? incoming.text : null,
-      senderPhoneHash: phoneHash,
-      messageType: incoming.type
-    });
-
     if (!user || !normalizedPhone) {
-      if (stored.status === "received" || stored.status === "failed") {
-        await this.options.messages.setInboundStatus(stored.id, "ignored");
+      if (await this.consumeLimit("whatsapp.security-audit", globalSubject, 5)) {
         await this.options.audit.record({
           eventType: "whatsapp.authorization",
           outcome: "denied",
-          messageId: stored.id,
-          details: { senderReference: phoneHash.slice(0, 12), reason: "not_whitelisted" }
+          details: { reason: "not_whitelisted" }
         });
+        logSafe(
+          this.options.logger,
+          "warn",
+          {},
+          "Ignored WhatsApp message from a non-whitelisted sender"
+        );
       }
-      logSafe(
-        this.options.logger,
-        "warn",
-        { senderReference: phoneHash.slice(0, 12) },
-        "Ignored WhatsApp message from a non-whitelisted sender"
-      );
       return { result: "unauthorized" };
     }
+
+    const stored = await this.options.messages.saveInbound({
+      externalMessageId: incoming.externalMessageId,
+      userId: user.id,
+      content: incoming.text,
+      senderPhone,
+      messageType: incoming.type
+    });
 
     if (stored.status !== "received" && stored.status !== "failed") return { result: "duplicate" };
     return {
@@ -239,7 +262,7 @@ export class MessageProcessor {
         storedId: stored.id,
         user,
         phoneE164: normalizedPhone,
-        phoneHash,
+        senderPhone,
         text: incoming.text
       }
     };
@@ -286,7 +309,8 @@ export class MessageProcessor {
   private async execute(queued: QueuedMessage, alreadyClaimed: boolean): Promise<ProcessingResult> {
     if (!alreadyClaimed && !(await this.options.messages.claimInbound(queued.storedId))) return "duplicate";
 
-    if (!this.rateLimiter.consume(queued.user.id)) {
+    const userRateSubject = this.options.identifiers.hash(queued.user.id, "rate-limit-user").hash;
+    if (!(await this.consumeLimit("whatsapp.user", userRateSubject, this.userRateLimit))) {
       await this.options.messages.setInboundStatus(queued.storedId, "ignored");
       await this.options.audit.record({
         userId: queued.user.id,
@@ -363,7 +387,7 @@ export class MessageProcessor {
         externalMessageId: sent.externalMessageId,
         userId: queued.user.id,
         content: command.text,
-        senderPhoneHash: queued.phoneHash,
+        senderPhone: queued.senderPhone,
         status: "sent"
       });
       return "sent";
@@ -373,7 +397,7 @@ export class MessageProcessor {
       replyToMessageId: queued.storedId,
       userId: queued.user.id,
       content: command.text,
-      senderPhoneHash: queued.phoneHash
+      senderPhone: queued.senderPhone
     });
     if (!reservation.shouldSend) {
       if (["sent", "delivered", "read"].includes(reservation.status)) return "sent";
@@ -419,5 +443,14 @@ export class MessageProcessor {
       { error, userId, messageId },
       "WhatsApp message processing failed"
     );
+  }
+
+  private async consumeLimit(scope: string, subjectHash: string, capacity: number): Promise<boolean> {
+    try {
+      return await this.options.rateLimits.consume(scope, subjectHash, capacity);
+    } catch (error) {
+      logSafe(this.options.logger, "error", { error, scope }, "Distributed rate limiter failed closed");
+      return false;
+    }
   }
 }

@@ -1,6 +1,5 @@
 export type AuthorizedUser = {
   id: string;
-  fullName: string;
   department: string | null;
   role: string;
 };

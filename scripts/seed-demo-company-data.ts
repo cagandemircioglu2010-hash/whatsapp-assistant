@@ -1,5 +1,6 @@
 import "dotenv/config";
 import pg from "pg";
+import { assertSafePostgresUrl, databaseTlsFromEnvironment } from "../src/config/database-tls.js";
 
 const { Pool } = pg;
 const databaseUrl =
@@ -7,7 +8,8 @@ const databaseUrl =
 if (!databaseUrl) {
   throw new Error("COMPANY_DATABASE_ADMIN_URL, DATABASE_ADMIN_URL or DATABASE_URL must be set");
 }
-const ssl = process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: true } : false;
+assertSafePostgresUrl(databaseUrl);
+const ssl = databaseTlsFromEnvironment(process.env, "company");
 const pool = new Pool({ connectionString: databaseUrl, ssl, max: 1 });
 const client = await pool.connect();
 
