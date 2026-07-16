@@ -10,10 +10,11 @@ Türkçe cevap gönderir.
 - Meta `X-Hub-Signature-256` HMAC doğrulaması; production'da kapatılamaz
 - Sabit-zamanlı webhook verify-token karşılaştırması
 - Yetkisiz numaraya cevap göndermeme ve mesaj içeriğini saklamama
-- Telefon için HMAC-SHA256 blind index; ham telefon yerine AES-256-GCM şifreli değer
+- Telefon, ad-soyad ve departman için ham değer yerine AES-256-GCM envelope; telefon lookup'u için HMAC blind index
 - Mesaj içerikleri için rastgele nonce ve authenticated purpose binding kullanan AES-256-GCM envelope
+- WhatsApp mesaj kimlikleri için plaintext yerine domain-separated HMAC blind index
 - Key ID içeren, eski anahtarlarla decrypt edilebilen key-ring rotasyonu
-- Varsayılan 30 günlük otomatik mesaj-içeriği temizliği
+- Varsayılan 30 gün içerik, 90 gün terminal mesaj kaydı ve 365 gün audit saklama politikası
 - DB tabanlı idempotent iş kuyruğu; iki dakikadan uzun takılan işleri ve açık hataları en fazla üç kez kurtarma
 - Giden cevap için inbound mesaj başına tekil outbox rezervasyonu
 - Ağ/5xx sonucu veya başarı cevabı belirsiz teslimatlarda kopya riskini azaltan retry engeli ve audit kaydı
@@ -48,7 +49,7 @@ Meta webhook
 ## Gereksinimler
 
 - Node.js 24 LTS (`>=24.14.0 <25`)
-- PostgreSQL 13+
+- PostgreSQL 14+ desteklenen bir minor sürüm; production için PostgreSQL 17 önerilir
 - Yerel DB için Docker Desktop
 
 ## Yerel kurulum
@@ -223,8 +224,9 @@ sorular MCP function-calling döngüsüne gider; model hatasında deterministik 
 
 ## Encryption migration ve key rotasyonu
 
-`003_app_data_protection.sql` yeni şifreli kolonları, blind indexi, outbox alanlarını ve recovery indexlerini ekler.
-Mevcut plaintext satırları şifrelemek için:
+`003_app_data_protection.sql` telefon/mesaj korumasını; `004_identity_lifecycle.sql` ad-soyad, departman,
+WhatsApp mesaj kimliği ve lifecycle indexlerini ekler. Mevcut plaintext satırları şifrelemek veya HMAC blind indexe
+dönüştürmek için:
 
 ```bash
 npm run db:migrate:app
@@ -236,28 +238,66 @@ Anahtar rotasyonu:
 1. Eski key'i JSON object içinde tut.
 2. Yeni 32-byte key ekle ve `DATA_ENCRYPTION_ACTIVE_KEY_ID` değerini yeni ID yap.
 3. Backend'i iki key ile deploy et.
-4. `npm run db:encrypt-existing` çalıştır; eski key ID'li kayıtlar aktif key ile yeniden şifrelenir.
+4. `npm run db:encrypt-existing` çalıştır; eski key ID'li telefon, ad-soyad, departman ve mesaj kayıtları aktif key
+   ile yeniden şifrelenir.
 5. DB ve backup'larda eski key'e bağlı veri kalmadığını doğruladıktan sonra eski key'i kaldır.
 
 Key kaybı şifreli veriyi geri döndürülemez yapar. Key'leri GitHub'a, loglara veya image içine koyma; Render secret
 environment variable olarak sakla. DB backup'ları eski plaintext veya eski-key ciphertext içerebileceği için backup
 retention ve erişim politikası ayrıca uygulanmalıdır.
 
+## Veri saklama ve müşteri kapanışı
+
+```env
+MESSAGE_RETENTION_DAYS=30
+MESSAGE_RECORD_RETENTION_DAYS=90
+AUDIT_RETENTION_DAYS=365
+```
+
+Uygulama mesaj gövdesini süresi dolunca otomatik temizler. Runtime rolüne `DELETE` yetkisi verilmez; terminal mesaj
+satırlarını ve audit kayıtlarını silen aşağıdaki admin komutunu ayrı bir günlük cron/job olarak çalıştır:
+
+```bash
+npm run db:purge-expired
+```
+
+Müşteri işi bittiğinde önce servisi durdur, sonra salt-okunur dry-run al:
+
+```bash
+npm run db:erase-client-data
+```
+
+Komutun yazdığı database adını doğruladıktan sonra açık onayla çalıştır:
+
+```bash
+npm run db:erase-client-data -- \
+  --confirm-database <exact-database-name> \
+  --confirm-erase-client-data
+```
+
+Bu komut sadece asistana ait `users`, `permissions`, `messages` ve `audit_events` verisini siler; müşterinin
+kaynak şirket/reporting database'ini silmez. Kapanış ancak encryption/HMAC key'leri, Meta/OpenAI/DB credential'ları,
+loglar, snapshot/backup/WAL kopyaları ve hosting kaynakları da ilgili sağlayıcılarda imha edildiğinde tamamlanır.
+Ayrıntılı ve doğrulanabilir prosedür: [docs/DATA_LIFECYCLE.md](docs/DATA_LIFECYCLE.md).
+
 ## Production rollout sırası
 
 Bu değişiklikler mevcut deployment'a uygulanırken:
 
 1. Uygulama DB backup'ı al.
-2. `PHONE_HASH_SECRET`, encryption key-ring, retention ve rate-limit env'lerini Render'a ekle.
-3. `npm run db:migrate:app` çalıştır.
-4. `npm run db:encrypt-existing` ile telefon ve mesaj plaintext'ini temizle.
-5. Dedicated DB doğrulamasından sonra `npm run db:provision-app-role -- --confirm-dedicated-database` çalıştır ve
+2. `PHONE_HASH_SECRET`, encryption key-ring, üç retention değeri ve rate-limit env'lerini Render'a ekle.
+3. Backend'i ve worker'ları kısa süre durdur.
+4. `npm run db:migrate:app` çalıştır.
+5. `npm run db:encrypt-existing` ile telefon, ad-soyad, departman, mesaj ve transport-ID
+   plaintext'ini temizle.
+6. Dedicated DB doğrulamasından sonra `npm run db:provision-app-role -- --confirm-dedicated-database` çalıştır ve
    `DATABASE_URL` değerini restricted role çevir.
-6. Yeni kodu deploy et; `/health` ve `/health/live` kontrol et.
-7. Meta test numarasıyla authorized, unauthorized, duplicate ve delivery-status senaryolarını doğrula.
+7. Yeni kodu deploy et; `/health` ve `/health/live` kontrol et.
+8. `npm run db:purge-expired` için günlük admin cron/job tanımla.
+9. Meta test numarasıyla authorized, unauthorized, duplicate ve delivery-status senaryolarını doğrula.
 
-Backfill telefon plaintext'ini temizledikten sonra eski uygulama sürümü whitelist lookup yapamaz. Rollback için DB
-backup'ını ve encryption destekli bu kod sürümünü birlikte koru.
+Backfill identity ve transport-ID plaintext'ini temizledikten sonra eski uygulama sürümü whitelist lookup/idempotency
+akışını yürütemez. Rollback için DB backup'ını ve encryption destekli bu kod sürümünü birlikte koru.
 
 ## Kontroller
 
@@ -279,7 +319,8 @@ npm ve GitHub Actions güncellemeleri açar.
 ## Veri güvenliği notları
 
 - `.env`, gerçek token/key, gerçek telefon, mesaj gövdesi ve şirket verisi Git'e eklenmez.
-- Yetkili mesaj içeriği yalnızca ciphertext olarak tutulur ve retention süresi dolunca temizlenir.
+- Yetkili mesaj içeriği yalnızca ciphertext olarak tutulur; kimlik ve transport ID alanları da plaintext değildir.
+- Süresi dolan mesaj gövdesi/metadata minimize edilir; terminal mesaj ve audit satırları admin purge ile silinir.
 - Yetkisiz mesaj içeriği DB'ye yazılmaz.
 - Audit kayıtlarında ham telefon yerine kısa pseudonymous reference bulunur.
 - Model tool argümanında kullanıcı ID'si veya telefon bulunmaz; actor backend oturumuna bağlıdır.

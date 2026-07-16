@@ -91,7 +91,11 @@ export async function buildApp(dependencies: AppDependencies) {
     : null;
   const users = new UserRepository(dependencies.appPool, dependencies.config.phoneHashSecret, encryption);
   const permissions = new PermissionRepository(dependencies.appPool);
-  const messages = new MessageRepository(dependencies.appPool, encryption);
+  const messages = new MessageRepository(
+    dependencies.appPool,
+    encryption,
+    dependencies.config.phoneHashSecret
+  );
   const audit = new AuditRepository(dependencies.appPool);
   const reports = new CompanyReportRepository(dependencies.companyReadonlyPool);
   const authorization = new AuthorizationService(permissions);

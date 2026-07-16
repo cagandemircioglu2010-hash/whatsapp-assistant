@@ -5,8 +5,10 @@ import type { EnvelopeEncryption } from "../security/encryption.js";
 
 type UserRow = {
   id: string;
-  full_name: string;
+  full_name: string | null;
+  full_name_ciphertext: string | null;
   department: string | null;
+  department_ciphertext: string | null;
   role: string;
 };
 
@@ -35,10 +37,39 @@ export class UserRepository implements UserLookup {
     private readonly encryption: EnvelopeEncryption | null = null
   ) {}
 
+  private decryptIdentityField(
+    plaintext: string | null,
+    ciphertext: string | null,
+    purpose: "users.full_name" | "users.department"
+  ): string | null {
+    if (!ciphertext) return plaintext;
+    if (!this.encryption) throw new Error("Encrypted user identity cannot be decrypted");
+    return this.encryption.decrypt(ciphertext, purpose);
+  }
+
+  private authorizedUser(row: UserRow): AuthorizedUser {
+    const fullName = this.decryptIdentityField(
+      row.full_name,
+      row.full_name_ciphertext,
+      "users.full_name"
+    );
+    if (!fullName) throw new Error("Active user name cannot be decrypted");
+    return {
+      id: row.id,
+      fullName,
+      department: this.decryptIdentityField(
+        row.department,
+        row.department_ciphertext,
+        "users.department"
+      ),
+      role: row.role
+    };
+  }
+
   async findActiveByPhone(phoneE164: string): Promise<AuthorizedUser | null> {
     const lookupHash = hashPhoneIdentifier(phoneE164, this.phoneHashSecret);
     const result = await this.pool.query<UserRow>(
-      `SELECT id, full_name, department, role
+      `SELECT id, full_name, full_name_ciphertext, department, department_ciphertext, role
        FROM users
        WHERE is_active = TRUE
          AND (phone_lookup_hash = $1 OR (phone_lookup_hash IS NULL AND phone_e164 = $2))
@@ -48,17 +79,13 @@ export class UserRepository implements UserLookup {
     const user = result.rows[0];
     if (!user) return null;
 
-    return {
-      id: user.id,
-      fullName: user.full_name,
-      department: user.department,
-      role: user.role
-    };
+    return this.authorizedUser(user);
   }
 
   async findActiveIdentityById(userId: string): Promise<AuthorizedUserIdentity | null> {
     const result = await this.pool.query<UserIdentityRow>(
-      `SELECT id, full_name, department, role, phone_e164, phone_ciphertext
+      `SELECT id, full_name, full_name_ciphertext, department, department_ciphertext,
+              role, phone_e164, phone_ciphertext
        FROM users
        WHERE id = $1 AND is_active = TRUE
        LIMIT 1`,
@@ -72,12 +99,7 @@ export class UserRepository implements UserLookup {
     if (!phoneE164) throw new Error("Active user phone identity cannot be decrypted");
     return {
       phoneE164,
-      user: {
-        id: row.id,
-        fullName: row.full_name,
-        department: row.department,
-        role: row.role
-      }
+      user: this.authorizedUser(row)
     };
   }
 }

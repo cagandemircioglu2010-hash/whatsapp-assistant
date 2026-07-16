@@ -24,6 +24,8 @@
     "db:provision-readonly": "tsx scripts/provision-readonly-role.ts",
     "db:provision-app-role": "tsx scripts/provision-app-role.ts",
     "db:encrypt-existing": "tsx scripts/encrypt-existing-data.ts",
+    "db:purge-expired": "tsx scripts/purge-expired-data.ts",
+    "db:erase-client-data": "tsx scripts/erase-client-data.ts",
     "db:add-user": "tsx scripts/add-whitelisted-user.ts",
     "db:set-user-active": "tsx scripts/set-user-active.ts",
     "db:seed-demo": "tsx scripts/seed-demo-company-data.ts",

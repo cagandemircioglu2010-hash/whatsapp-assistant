@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import type { EnvelopeEncryption } from "../security/encryption.js";
+import { hashOpaqueIdentifier } from "../security/phone.js";
 import type { WhatsAppMessageStatus } from "../whatsapp/types.js";
 
 export type InboundMessageRecord = {
@@ -77,8 +78,13 @@ export interface MessageStatusStore {
 export class MessageRepository implements MessageStore {
   constructor(
     private readonly pool: Pool,
-    private readonly encryption: EnvelopeEncryption | null
+    private readonly encryption: EnvelopeEncryption | null,
+    private readonly identifierHashSecret: string
   ) {}
+
+  private externalMessageIdHash(externalMessageId: string): string {
+    return hashOpaqueIdentifier(externalMessageId, this.identifierHashSecret, "whatsapp-message-id");
+  }
 
   private encryptContent(content: string | null): { ciphertext: string | null; keyId: string | null } {
     if (content === null) return { ciphertext: null, keyId: null };
@@ -91,15 +97,15 @@ export class MessageRepository implements MessageStore {
     const protectedContent = this.encryptContent(input.content);
     const result = await this.pool.query<MessageRow>(
       `INSERT INTO messages (
-         external_message_id, user_id, direction, message_type, content,
+         external_message_id, external_message_id_hash, user_id, direction, message_type, content,
          content_ciphertext, content_key_id, sender_phone_hash, status, metadata
        )
-       VALUES ($1, $2, 'inbound', $3, NULL, $4, $5, $6, 'received', $7::jsonb)
-       ON CONFLICT (external_message_id) WHERE external_message_id IS NOT NULL
-       DO UPDATE SET external_message_id = EXCLUDED.external_message_id
+       VALUES (NULL, $1, $2, 'inbound', $3, NULL, $4, $5, $6, 'received', $7::jsonb)
+       ON CONFLICT (external_message_id_hash) WHERE external_message_id_hash IS NOT NULL
+       DO UPDATE SET external_message_id_hash = EXCLUDED.external_message_id_hash
        RETURNING id, status, processing_attempts`,
       [
-        input.externalMessageId,
+        this.externalMessageIdHash(input.externalMessageId),
         input.userId,
         input.messageType,
         protectedContent.ciphertext,
@@ -180,13 +186,13 @@ export class MessageRepository implements MessageStore {
     const protectedContent = this.encryptContent(input.content);
     const result = await this.pool.query<{ id: string }>(
       `INSERT INTO messages (
-         external_message_id, user_id, direction, message_type, content,
+         external_message_id, external_message_id_hash, user_id, direction, message_type, content,
          content_ciphertext, content_key_id, sender_phone_hash, status, metadata
        )
-       VALUES ($1, $2, 'outbound', 'text', NULL, $3, $4, $5, $6, $7::jsonb)
+       VALUES (NULL, $1, $2, 'outbound', 'text', NULL, $3, $4, $5, $6, $7::jsonb)
        RETURNING id`,
       [
-        input.externalMessageId ?? null,
+        input.externalMessageId ? this.externalMessageIdHash(input.externalMessageId) : null,
         input.userId,
         protectedContent.ciphertext,
         protectedContent.keyId,
@@ -242,10 +248,11 @@ export class MessageRepository implements MessageStore {
   async markOutboundSent(messageId: string, externalMessageId: string): Promise<void> {
     const result = await this.pool.query<{ id: string }>(
       `UPDATE messages
-       SET external_message_id = $2, status = 'sent', updated_at = NOW()
+       SET external_message_id = NULL, external_message_id_hash = $2,
+           status = 'sent', updated_at = NOW()
        WHERE id = $1 AND status = 'sending'
        RETURNING id`,
-      [messageId, externalMessageId]
+      [messageId, this.externalMessageIdHash(externalMessageId)]
     );
     if (!result.rows[0]) throw new Error("Outbound delivery state could not be finalized");
   }
@@ -273,7 +280,7 @@ export class MessageRepository implements MessageStore {
     const result = await this.pool.query<{ id: string; user_id: string | null }>(
       `UPDATE messages
        SET status = $2, updated_at = NOW()
-       WHERE external_message_id = $1
+       WHERE external_message_id_hash = $1
          AND direction = 'outbound'
          AND (
            ($2 = 'sent' AND status IN ('sending', 'sent'))
@@ -282,7 +289,7 @@ export class MessageRepository implements MessageStore {
            OR ($2 = 'failed' AND status IN ('sending', 'sent', 'failed'))
          )
        RETURNING id, user_id`,
-      [externalMessageId, status]
+      [this.externalMessageIdHash(externalMessageId), status]
     );
     const row = result.rows[0];
     return row ? { id: row.id, userId: row.user_id } : null;
@@ -291,7 +298,7 @@ export class MessageRepository implements MessageStore {
   async listRecentForUser(userId: string, limit = 50): Promise<Array<Record<string, unknown>>> {
     const safeLimit = Math.min(Math.max(limit, 1), 100);
     const result = await this.pool.query(
-      `SELECT id, external_message_id, direction, message_type, content,
+      `SELECT id, direction, message_type, content,
               content_ciphertext, status, created_at
        FROM messages
        WHERE user_id = $1
@@ -315,9 +322,14 @@ export class MessageRepository implements MessageStore {
     }
     const result = await this.pool.query(
       `UPDATE messages
-       SET content = NULL, content_ciphertext = NULL, content_key_id = NULL, updated_at = NOW()
+       SET content = NULL, content_ciphertext = NULL, content_key_id = NULL,
+           metadata = '{}'::jsonb, updated_at = NOW()
        WHERE created_at < NOW() - ($1::integer * INTERVAL '1 day')
-         AND (content IS NOT NULL OR content_ciphertext IS NOT NULL)`,
+         AND (
+           content IS NOT NULL
+           OR content_ciphertext IS NOT NULL
+           OR metadata <> '{}'::jsonb
+         )`,
       [retentionDays]
     );
     return result.rowCount ?? 0;

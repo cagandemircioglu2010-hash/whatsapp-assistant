@@ -1,6 +1,6 @@
 import "dotenv/config";
 import pg from "pg";
-import { hashPhoneIdentifier, normalizePhoneNumber, phoneLastFour } from "../src/security/phone.js";
+import { hashPhoneIdentifier, normalizePhoneNumber } from "../src/security/phone.js";
 
 const { Pool } = pg;
 const argument = (name: string): string | undefined => {
@@ -8,11 +8,11 @@ const argument = (name: string): string | undefined => {
   return index >= 0 ? process.argv[index + 1] : undefined;
 };
 
-const databaseUrl = process.env.DATABASE_ADMIN_URL ?? process.env.DATABASE_URL;
+const databaseUrl = process.env.DATABASE_ADMIN_URL;
 const secret = process.env.PHONE_HASH_SECRET;
 const rawPhone = argument("phone");
 const requestedState = argument("active");
-if (!databaseUrl) throw new Error("DATABASE_ADMIN_URL or DATABASE_URL must be set");
+if (!databaseUrl) throw new Error("DATABASE_ADMIN_URL must be set");
 if (!secret || secret.length < 32) throw new Error("PHONE_HASH_SECRET must be set");
 if (!rawPhone || !new Set(["true", "false"]).has(requestedState ?? "")) {
   throw new Error('Usage: npm run db:set-user-active -- --phone "+905..." --active true|false');
@@ -41,7 +41,7 @@ try {
     [userId, JSON.stringify({ active })]
   );
   await client.query("COMMIT");
-  process.stdout.write(`User ending in ${phoneLastFour(phone)} is now ${active ? "active" : "inactive"}.\n`);
+  process.stdout.write(`User is now ${active ? "active" : "inactive"}.\n`);
 } catch (error) {
   await client.query("ROLLBACK").catch(() => undefined);
   throw error;

@@ -20,6 +20,8 @@ function config(): AppConfig {
     companyTimezone: "Europe/Istanbul",
     dataEncryption: null,
     messageRetentionDays: 30,
+    messageRecordRetentionDays: 90,
+    auditRetentionDays: 365,
     webhookBodyLimitBytes: 16_384,
     userRateLimitPerMinute: 20,
     messageWorkerConcurrency: 4,

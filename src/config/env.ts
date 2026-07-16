@@ -31,6 +31,8 @@ const schema = z
     DATA_ENCRYPTION_ACTIVE_KEY_ID: z.string().optional(),
     DATA_ENCRYPTION_KEYS: z.string().optional(),
     MESSAGE_RETENTION_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+    MESSAGE_RECORD_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(90),
+    AUDIT_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(365),
     WEBHOOK_BODY_LIMIT_BYTES: z.coerce.number().int().min(16_384).max(1_048_576).default(262_144),
     USER_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).max(120).default(20),
     MESSAGE_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(4),
@@ -104,6 +106,14 @@ const schema = z
         code: z.ZodIssueCode.custom,
         path: ["PHONE_HASH_SECRET"],
         message: "PHONE_HASH_SECRET is too predictable for production"
+      });
+    }
+
+    if (env.MESSAGE_RECORD_RETENTION_DAYS < env.MESSAGE_RETENTION_DAYS) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["MESSAGE_RECORD_RETENTION_DAYS"],
+        message: "Message record retention cannot be shorter than message content retention"
       });
     }
 
@@ -198,6 +208,8 @@ export type AppConfig = {
   companyTimezone: string;
   dataEncryption: DataEncryptionConfig | null;
   messageRetentionDays: number;
+  messageRecordRetentionDays: number;
+  auditRetentionDays: number;
   webhookBodyLimitBytes: number;
   userRateLimitPerMinute: number;
   messageWorkerConcurrency: number;
@@ -241,6 +253,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     companyTimezone: env.COMPANY_TIMEZONE,
     dataEncryption,
     messageRetentionDays: env.MESSAGE_RETENTION_DAYS,
+    messageRecordRetentionDays: env.MESSAGE_RECORD_RETENTION_DAYS,
+    auditRetentionDays: env.AUDIT_RETENTION_DAYS,
     webhookBodyLimitBytes: env.WEBHOOK_BODY_LIMIT_BYTES,
     userRateLimitPerMinute: env.USER_RATE_LIMIT_PER_MINUTE,
     messageWorkerConcurrency: env.MESSAGE_WORKER_CONCURRENCY,

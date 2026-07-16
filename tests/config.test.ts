@@ -32,7 +32,19 @@ describe("application configuration", () => {
     });
     expect(loaded.dataEncryption?.activeKeyId).toBe("current");
     expect(loaded.messageRetentionDays).toBe(30);
+    expect(loaded.messageRecordRetentionDays).toBe(90);
+    expect(loaded.auditRetentionDays).toBe(365);
     expect(loaded.messageWorkerConcurrency).toBe(4);
+  });
+
+  it("rejects record retention shorter than encrypted content retention", () => {
+    expect(() =>
+      loadConfig({
+        ...baseEnvironment,
+        MESSAGE_RETENTION_DAYS: "30",
+        MESSAGE_RECORD_RETENTION_DAYS: "29"
+      })
+    ).toThrow("Message record retention");
   });
 
   it("rejects non-PostgreSQL connection URLs", () => {

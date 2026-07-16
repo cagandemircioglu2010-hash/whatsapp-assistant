@@ -185,7 +185,7 @@ export class MessageProcessor {
       eventType: "whatsapp.delivery_status",
       outcome: update.status === "failed" ? "failure" : "success",
       messageId: message.id,
-      details: { status: update.status, whatsappTimestamp: update.timestamp }
+      details: { status: update.status }
     });
   }
 
@@ -210,11 +210,7 @@ export class MessageProcessor {
       userId: user?.id ?? null,
       content: user ? incoming.text : null,
       senderPhoneHash: phoneHash,
-      messageType: incoming.type,
-      metadata: {
-        whatsappTimestamp: incoming.timestamp,
-        authorization: user ? "allowed" : "denied"
-      }
+      messageType: incoming.type
     });
 
     if (!user || !normalizedPhone) {
@@ -368,8 +364,7 @@ export class MessageProcessor {
         userId: queued.user.id,
         content: command.text,
         senderPhoneHash: queued.phoneHash,
-        status: "sent",
-        metadata: { resources: command.resources, outcome: command.outcome }
+        status: "sent"
       });
       return "sent";
     }
@@ -378,8 +373,7 @@ export class MessageProcessor {
       replyToMessageId: queued.storedId,
       userId: queued.user.id,
       content: command.text,
-      senderPhoneHash: queued.phoneHash,
-      metadata: { resources: command.resources, outcome: command.outcome }
+      senderPhoneHash: queued.phoneHash
     });
     if (!reservation.shouldSend) {
       if (["sent", "delivered", "read"].includes(reservation.status)) return "sent";

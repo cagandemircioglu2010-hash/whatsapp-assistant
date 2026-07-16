@@ -1,6 +1,6 @@
 import "dotenv/config";
 import pg from "pg";
-import { hashPhoneIdentifier, normalizePhoneNumber, phoneLastFour } from "../src/security/phone.js";
+import { hashPhoneIdentifier, normalizePhoneNumber } from "../src/security/phone.js";
 import { reportResources } from "../src/auth/types.js";
 import { EnvelopeEncryption, parseDataEncryptionConfig } from "../src/security/encryption.js";
 
@@ -11,8 +11,8 @@ function argument(name: string): string | undefined {
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
-const databaseUrl = process.env.DATABASE_ADMIN_URL ?? process.env.DATABASE_URL;
-if (!databaseUrl) throw new Error("DATABASE_ADMIN_URL or DATABASE_URL must be set");
+const databaseUrl = process.env.DATABASE_ADMIN_URL;
+if (!databaseUrl) throw new Error("DATABASE_ADMIN_URL must be set");
 const phoneHashSecret = process.env.PHONE_HASH_SECRET;
 const activeKeyId = process.env.DATA_ENCRYPTION_ACTIVE_KEY_ID;
 const keysJson = process.env.DATA_ENCRYPTION_KEYS;
@@ -53,6 +53,11 @@ try {
   await client.query("BEGIN");
   const phoneLookupHash = hashPhoneIdentifier(phone, phoneHashSecret);
   const protectedPhone = encryption.encrypt(phone, "users.phone");
+  const protectedFullName = encryption.encrypt(fullName.trim(), "users.full_name");
+  const normalizedDepartment = department?.trim() || null;
+  const protectedDepartment = normalizedDepartment
+    ? encryption.encrypt(normalizedDepartment, "users.department")
+    : null;
   const existing = await client.query<{ id: string }>(
     `SELECT id FROM users
      WHERE phone_lookup_hash = $1 OR (phone_lookup_hash IS NULL AND phone_e164 = $2)
@@ -65,7 +70,9 @@ try {
     ? await client.query<{ id: string }>(
         `UPDATE users
          SET phone_e164 = NULL, phone_lookup_hash = $2, phone_ciphertext = $3, phone_key_id = $4,
-             full_name = $5, department = $6, role = $7, is_active = TRUE, updated_at = NOW()
+             full_name = NULL, full_name_ciphertext = $5, full_name_key_id = $6,
+             department = NULL, department_ciphertext = $7, department_key_id = $8,
+             role = $9, is_active = TRUE, updated_at = NOW()
          WHERE id = $1
          RETURNING id`,
         [
@@ -73,23 +80,29 @@ try {
           phoneLookupHash,
           protectedPhone.ciphertext,
           protectedPhone.keyId,
-          fullName.trim(),
-          department?.trim() ?? null,
+          protectedFullName.ciphertext,
+          protectedFullName.keyId,
+          protectedDepartment?.ciphertext ?? null,
+          protectedDepartment?.keyId ?? null,
           role
         ]
       )
     : await client.query<{ id: string }>(
         `INSERT INTO users (
            phone_e164, phone_lookup_hash, phone_ciphertext, phone_key_id,
-           full_name, department, role, is_active
-         ) VALUES (NULL, $1, $2, $3, $4, $5, $6, TRUE)
+           full_name, full_name_ciphertext, full_name_key_id,
+           department, department_ciphertext, department_key_id,
+           role, is_active
+         ) VALUES (NULL, $1, $2, $3, NULL, $4, $5, NULL, $6, $7, $8, TRUE)
          RETURNING id`,
         [
           phoneLookupHash,
           protectedPhone.ciphertext,
           protectedPhone.keyId,
-          fullName.trim(),
-          department?.trim() ?? null,
+          protectedFullName.ciphertext,
+          protectedFullName.keyId,
+          protectedDepartment?.ciphertext ?? null,
+          protectedDepartment?.keyId ?? null,
           role
         ]
       );
@@ -115,7 +128,7 @@ try {
     [userId, JSON.stringify({ resources: requestedPermissions })]
   );
   await client.query("COMMIT");
-  process.stdout.write(`Whitelisted user ending in ${phoneLastFour(phone)} is ready.\n`);
+  process.stdout.write("Whitelisted user is ready.\n");
 } catch (error) {
   await client.query("ROLLBACK").catch(() => undefined);
   throw error;
