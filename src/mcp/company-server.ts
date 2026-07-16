@@ -30,6 +30,21 @@ const readOnlyAnnotations = {
   openWorldHint: false
 } as const;
 
+const crossDepartmentRoles = new Set(["manager", "executive", "admin"]);
+
+function scopedListOptions(
+  actor: AuthorizedUser,
+  requestedDepartment: string | null,
+  resource: string,
+  limit: number | null
+): { limit: number; department?: string } {
+  if (crossDepartmentRoles.has(actor.role.toLowerCase())) {
+    return { limit: limit ?? 10, ...(requestedDepartment ? { department: requestedDepartment } : {}) };
+  }
+  if (!actor.department) throw new PermissionDeniedError(resource);
+  return { limit: limit ?? 10, department: actor.department };
+}
+
 export function createCompanyMcpServer(dependencies: CompanyMcpServerDependencies): McpServer {
   const server = new McpServer({ name: "company-reporting", version: "0.2.0" });
 
@@ -112,10 +127,11 @@ export function createCompanyMcpServer(dependencies: CompanyMcpServerDependencie
     },
     async ({ limit, department }) =>
       runTool("get_active_projects", async () => ({
-        projects: await dependencies.reports.getActiveProjects({
-          limit: limit ?? 10,
-          ...(department ? { department } : {})
-        })
+        projects: (
+          await dependencies.reports.getActiveProjects(
+            scopedListOptions(dependencies.actor, department, reportResources.projects, limit)
+          )
+        ).map(({ id: _id, updatedAt: _updatedAt, ...project }) => project)
       }))
   );
 
@@ -133,10 +149,11 @@ export function createCompanyMcpServer(dependencies: CompanyMcpServerDependencie
     },
     async ({ limit, department }) =>
       runTool("get_overdue_tasks", async () => ({
-        tasks: await dependencies.reports.getOverdueTasks({
-          limit: limit ?? 10,
-          ...(department ? { department } : {})
-        })
+        tasks: (
+          await dependencies.reports.getOverdueTasks(
+            scopedListOptions(dependencies.actor, department, reportResources.tasks, limit)
+          )
+        ).map(({ id: _id, projectId: _projectId, updatedAt: _updatedAt, ...task }) => task)
       }))
   );
 

@@ -37,7 +37,7 @@ await pool.query(`
 const files = (await readdir(migrationsDirectory))
   .filter((filename) => /^\d+_.+\.sql$/.test(filename))
   .filter((filename) => {
-    if (scope === "app") return filename === "001_identity_messages.sql";
+    if (scope === "app") return filename !== "002_company_reporting.sql";
     if (scope === "company") return filename === "002_company_reporting.sql";
     return true;
   })

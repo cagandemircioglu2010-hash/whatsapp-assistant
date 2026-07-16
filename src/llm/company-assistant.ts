@@ -60,15 +60,30 @@ function parseArguments(value: string): Record<string, unknown> {
 }
 
 function serializeToolResult(result: McpToolResult): string {
-  const value = result.structuredContent ?? { content: result.content, isError: result.isError ?? false };
+  const value = {
+    untrustedCompanyData: result.structuredContent ?? {
+      content: result.content,
+      isError: result.isError ?? false
+    }
+  };
   const serialized = JSON.stringify(value);
   return serialized.length <= 20_000 ? serialized : `${serialized.slice(0, 19_900)}...[truncated]`;
 }
 
 function finalText(value: string): string {
-  const text = value.trim();
+  const text = value
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .replace(/[\u202A-\u202E\u2066-\u2069]/g, "")
+    .trim();
   if (!text) throw new Error("LLM returned no final response");
   return text.length <= 3_500 ? text : `${text.slice(0, 3_480)}…`;
+}
+
+function safeUserInput(value: string): string {
+  return value
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .replace(/[\u202A-\u202E\u2066-\u2069]/g, "")
+    .slice(0, 4096);
 }
 
 function isCompanyToolName(name: string): name is CompanyToolName {
@@ -88,18 +103,20 @@ export class CompanyLlmAssistant implements AssistantResponder {
     let successfulCalls = 0;
     let deniedCalls = 0;
     let toolCallCount = 0;
+    const seenCallIds = new Set<string>();
 
     try {
       const mcpTools = await session.listTools();
       const allowedToolNames = new Set(mcpTools.map((tool) => tool.name));
       const tools = mcpTools.map(toLlmTool);
       const safetyIdentifier = createHmac("sha256", this.options.safetyIdentifierSecret)
+        .update("llm-safety-identifier\u0000")
         .update(user.id)
         .digest("hex");
       const inputItems: unknown[] = [
         {
           role: "user",
-          content: [{ type: "input_text", text: incomingText }]
+          content: [{ type: "input_text", text: safeUserInput(incomingText) }]
         }
       ];
 
@@ -132,6 +149,10 @@ export class CompanyLlmAssistant implements AssistantResponder {
           if (toolCallCount > this.options.maxToolCalls) {
             throw new Error("Maximum tool call count exceeded");
           }
+          if (!call.callId || call.callId.length > 200 || seenCallIds.has(call.callId)) {
+            throw new Error("Invalid or repeated tool call id");
+          }
+          seenCallIds.add(call.callId);
 
           let result: McpToolResult;
           if (!allowedToolNames.has(call.name) || !isCompanyToolName(call.name)) {

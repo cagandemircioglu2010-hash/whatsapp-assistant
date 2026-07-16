@@ -6,6 +6,12 @@ export type IncomingWhatsAppMessage = {
   timestamp: string;
 };
 
+export type WhatsAppMessageStatus = {
+  externalMessageId: string;
+  status: "sent" | "delivered" | "read" | "failed";
+  timestamp: string;
+};
+
 export interface WhatsAppSender {
   sendText(to: string, text: string): Promise<{ externalMessageId: string }>;
 }

@@ -1,218 +1,201 @@
 # Company WhatsApp Assistant
 
-WhatsApp üzerinden yetkili çalışanlara şirket satış, proje ve görev bilgilerini veren güvenli TypeScript/PostgreSQL, MCP ve OpenAI backend'i.
+Yetkili çalışanlara WhatsApp üzerinden toplu satış, aktif proje ve geciken görev bilgisi veren
+TypeScript/PostgreSQL, MCP ve OpenAI backend'i. Uygulama Meta webhook'larını doğrular, kullanıcıyı
+telefon whitelist'iyle yetkilendirir, şirket verisini salt-okunur reporting view'larından alır ve kısa
+Türkçe cevap gönderir.
 
-Bu sürüm 3–6. gün kapsamını tamamlar:
+## Güvenlik ve güvenilirlik özellikleri
 
-- `users`, `permissions`, `messages` ve `audit_events` tabloları
-- E.164 telefon numarasıyla whitelist kontrolü
-- Yetkisiz numaralara cevap göndermeme
-- Yetkisiz mesajların içeriğini saklamama
-- İdempotent gelen mesaj kaydı ve en fazla üç işleme denemesi
-- Gelen ve giden konuşma geçmişi
-- Hassas alanları ve metin içindeki telefon/e-posta/token/DB URL değerlerini loglardan maskeleme
-- Meta webhook HMAC imza doğrulaması
-- Ayrı ve salt-okunur şirket DB bağlantısı
-- Yalnızca kontrollü reporting view'larına erişebilen PostgreSQL rolü
-- Parametreli satış özeti, aktif proje ve geciken görev sorguları
-- Kaynak bazlı kullanıcı izin kontrolü
-- Doğrulanmış kullanıcıya bağlanan gerçek MCP client/server oturumu
-- `get_sales_summary`, `get_active_projects` ve `get_overdue_tasks` MCP araçları
-- OpenAI Responses API function-calling döngüsü
-- Model hatasında deterministik komut yönlendiriciye otomatik dönüş
-- Stateless API kullanımı (`store=false`) ve hash'lenmiş `safety_identifier`
+- Meta `X-Hub-Signature-256` HMAC doğrulaması; production'da kapatılamaz
+- Sabit-zamanlı webhook verify-token karşılaştırması
+- Yetkisiz numaraya cevap göndermeme ve mesaj içeriğini saklamama
+- Telefon, ad-soyad ve departman için ham değer yerine AES-256-GCM envelope; telefon lookup'u için HMAC blind index
+- Mesaj içerikleri için rastgele nonce ve authenticated purpose binding kullanan AES-256-GCM envelope
+- WhatsApp mesaj kimlikleri için plaintext yerine domain-separated HMAC blind index
+- Key ID içeren, eski anahtarlarla decrypt edilebilen key-ring rotasyonu
+- Varsayılan 30 gün içerik, 90 gün terminal mesaj kaydı ve 365 gün audit saklama politikası
+- DB tabanlı idempotent iş kuyruğu; iki dakikadan uzun takılan işleri ve açık hataları en fazla üç kez kurtarma
+- Giden cevap için inbound mesaj başına tekil outbox rezervasyonu
+- Ağ/5xx sonucu veya başarı cevabı belirsiz teslimatlarda kopya riskini azaltan retry engeli ve audit kaydı
+- Meta `sent`, `delivered`, `read` ve `failed` durum güncellemeleri
+- Kullanıcı başına token-bucket rate limit, 256 KiB body limiti, global batch sınırı ve kontrol-karakter temizliği
+- DB'de kalıcı kuyrukla birlikte sınırlı worker concurrency ve taşma durumunda güvenli recovery
+- Resource permission kontrolü ve çalışanlar için zorunlu departman kapsamı
+- Modelin yalnızca kullanıcının izinli MCP araçlarını görmesi
+- Şirket DB'si için view-only rol; uygulama DB'si için ayrı minimum-yetkili runtime rolü
+- Parametreli SQL, read-only transaction, statement/lock/idle-transaction timeout'ları
+- Mesaj, telefon, e-posta, token, key ve DB URL değerlerini loglardan maskeleme
+- OpenAI Responses API'de `store=false`, domain-separated hash `safety_identifier` ve sınırlı tool döngüsü
+- Pinned GitHub Actions, CodeQL, Dependabot, coverage eşiği, adversarial/stress testleri ve history secret scan
 
 ## Mesaj akışı
 
 ```text
-WhatsApp webhook
-  -> Meta imza doğrulaması
-  -> mesaj ID ile idempotency kontrolü
-  -> telefon normalizasyonu ve whitelist
-  -> OpenAI Responses tool seçimi
-  -> kullanıcıya bağlı MCP oturumu
-  -> resource permission kontrolü
-  -> READ ONLY şirket sorgusu/view
-  -> tool sonucunun modele dönmesi
-  -> WhatsApp cevabı
-  -> mesaj, MCP çağrısı ve audit kaydı
+Meta webhook
+  -> raw body üzerinde HMAC doğrulaması
+  -> payload ve boyut sınırları
+  -> telefon normalizasyonu + blind-index whitelist
+  -> şifreli ve idempotent DB kuyruğuna kayıt
+  -> Meta'ya hızlı HTTP 200
+  -> background worker / stale-job recovery
+  -> permission + departman kapsamı
+  -> MCP aracı + READ ONLY reporting view
+  -> OpenAI cevabı veya deterministik fallback
+  -> tekil outbox rezervasyonu
+  -> WhatsApp gönderimi + teslimat/audit kaydı
 ```
 
 ## Gereksinimler
 
-- Node.js 20 veya üzeri
-- PostgreSQL 13 veya üzeri
-- Yerel geliştirme için Docker Desktop kullanılabilir
+- Node.js 24 LTS (`>=24.14.0 <25`)
+- PostgreSQL 14+ desteklenen bir minor sürüm; production için PostgreSQL 17 önerilir
+- Yerel DB için Docker Desktop
 
-## 1. Yerel kurulum
+## Yerel kurulum
+
+1. Ortam dosyasını oluştur ve dependency'leri kur:
 
 ```bash
 cp .env.example .env
-npm install
-docker compose up -d
-npm run db:migrate
-npm run db:provision-readonly
+npm ci --ignore-scripts
 ```
 
-`.env` içindeki şu değerleri mutlaka değiştir:
-
-```env
-COMPANY_READONLY_PASSWORD=<uzun-rastgele-parola>
-COMPANY_READONLY_DATABASE_URL=postgresql://company_assistant_reader:<aynı-parola>@localhost:5432/company_assistant
-PHONE_HASH_SECRET=<en-az-32-rastgele-karakter>
-```
-
-Mac'te güvenli rastgele değer üretmek için:
+2. Mac Terminal'de birbirinden farklı güvenli değerler üret:
 
 ```bash
 openssl rand -hex 32
+openssl rand -base64 32
 ```
 
-## 2. Whitelist kullanıcısı ekleme
+`.env` içinde en az şu alanları doldur:
 
-Tüm üç rapora erişebilen kullanıcı:
+```env
+POSTGRES_PASSWORD=<yerel-docker-parolasi>
+PHONE_HASH_SECRET=<openssl-rand-hex-32-ciktisi>
+
+DATA_ENCRYPTION_ACTIVE_KEY_ID=2026_07
+DATA_ENCRYPTION_KEYS={"2026_07":"<openssl-rand-base64-32-ciktisi>"}
+MESSAGE_WORKER_CONCURRENCY=4
+
+APP_RUNTIME_PASSWORD=<ayri-uzun-parola>
+COMPANY_READONLY_PASSWORD=<baska-bir-uzun-parola>
+```
+
+URL parolalarını aynı değerlerle elle güncelle. `dotenv`, URL içindeki `${VARIABLE}` ifadelerini otomatik
+genişletmez.
+
+3. DB'yi ve rolleri hazırla:
+
+```bash
+docker compose up -d
+npm run db:migrate
+npm run db:provision-app-role -- --confirm-dedicated-database
+npm run db:provision-readonly -- --confirm-dedicated-database
+```
+
+Uygulama migration'ları `DATABASE_ADMIN_URL` ile çalışır. Çalışan backend'in `DATABASE_URL` değeri
+`APP_RUNTIME_USER` ve `APP_RUNTIME_PASSWORD` ile oluşturulan URL olmalıdır.
+
+## Database ayrımı ve yetkiler
+
+```env
+DATABASE_ADMIN_URL=<app-db-admin-url>
+DATABASE_URL=<restricted-app-runtime-url>
+
+COMPANY_DATABASE_ADMIN_URL=<company-db-admin-url>
+COMPANY_READONLY_DATABASE_URL=<reporting-view-only-url>
+```
+
+Provision komutları `PUBLIC` üzerinden kalıtılan schema `CREATE` ve database `TEMPORARY` haklarını database
+genelinde kaldırır. Bu nedenle yalnızca bu asistan için ayrılmış database/raporlama replica'sında ve
+`--confirm-dedicated-database` onayıyla çalıştırılmalıdır; paylaşılan database'de önce diğer rollerle koordine et.
+
+App runtime rolü:
+
+- `users`, `permissions`: `SELECT`
+- `messages`: `SELECT`, `INSERT`, `UPDATE`
+- `audit_events`: `INSERT`
+- migration, schema oluşturma, audit değiştirme/silme ve kaynak şirket tabloları: erişim yok
+
+Company reporting rolü:
+
+- `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `NOINHERIT`, bağlantı limiti `5`
+- `default_transaction_read_only=on`
+- statement `5s`, lock `2s`, idle transaction `10s`
+- `TEMPORARY`, `public` ve `company_source` erişimi revoke
+- yalnızca `assistant_reporting.sales_daily`, `active_projects`, `overdue_tasks` için `SELECT`
+
+Gerçek şirket şemasına geçerken `migrations/002_company_reporting.sql` içindeki view'ları mevcut tablo ve
+kolonlara eşleştir:
+
+```bash
+npm run db:migrate:company
+npm run db:provision-readonly -- --confirm-dedicated-database
+npm run reports:smoke
+```
+
+## Whitelist yönetimi
+
+Tüm raporlara erişebilen manager:
 
 ```bash
 npm run db:add-user -- \
   --phone "+905551234567" \
   --name "Test Kullanıcı" \
   --department "Management" \
-  --role "manager"
+  --role "manager" \
+  --permissions "company.sales,company.projects,company.tasks"
 ```
 
-Yalnızca satış raporuna erişebilen kullanıcı:
+Yalnızca satış raporuna erişebilen çalışan:
 
 ```bash
 npm run db:add-user -- \
   --phone "+905551234567" \
   --name "Satış Kullanıcısı" \
   --department "Sales" \
+  --role "employee" \
   --permissions "company.sales"
 ```
 
-Desteklenen permission kaynakları:
+`--permissions` verilmezse güvenli varsayılan olarak hiçbir rapor izni tanımlanmaz. Komut her çalıştırıldığında
+kullanıcının read permission setini verilen listeyle senkronize eder; önceki fazla izinler kaldırılır. Kullanıcıyı
+devre dışı bırak:
 
-| Kaynak | Verdiği erişim |
-|---|---|
-| `company.sales` | Son yedi günlük toplu satış özeti |
-| `company.projects` | Aktif projeler |
-| `company.tasks` | Geciken görevler |
-
-Bir kullanıcıyı kapatmak için:
-
-```sql
-UPDATE users SET is_active = FALSE, updated_at = NOW()
-WHERE phone_e164 = '+905551234567';
+```bash
+npm run db:set-user-active -- --phone "+905551234567" --active false
 ```
 
-## 3. Demo şirket verisi
+| Resource | Erişim |
+|---|---|
+| `company.sales` | Tarih aralığında toplu satış/iade özeti |
+| `company.projects` | Aktif proje özeti |
+| `company.tasks` | Geciken görevler |
+
+`employee` rolünde proje ve görev sorgusu whitelist'teki departmana zorlanır. `manager`, `executive` ve `admin`
+rolleri izinleri varsa departmanlar arası sorgu yapabilir.
+
+## Demo veri
 
 ```bash
 npm run db:seed-demo
 npm run reports:smoke
 ```
 
-Smoke test üç sorguyu `COMPANY_READONLY_DATABASE_URL` üzerinden çalıştırır. Bu nedenle admin bağlantısıyla yanlışlıkla yazma yetkisi kullanmaz.
+Smoke test yalnızca `COMPANY_READONLY_DATABASE_URL` kullanır.
 
-## 4. Gerçek şirket veritabanına bağlama
-
-Yerel örnekte uygulama ve şirket verisi aynı PostgreSQL database'inde bulunabilir. Üretimde iki bağlantı ayrı tutulur:
-
-```env
-DATABASE_URL=<users-permissions-messages-db>
-DATABASE_ADMIN_URL=<uygulama-db-migration-bağlantısı>
-
-COMPANY_DATABASE_ADMIN_URL=<şirket-db-view-kurulum-bağlantısı>
-COMPANY_READONLY_DATABASE_URL=<yalnızca-reporting-view-okuyabilen-bağlantı>
-```
-
-Uygulama tablolarını kur:
-
-```bash
-npm run db:migrate:app
-```
-
-`migrations/002_company_reporting.sql` içindeki üç view'ı şirketin mevcut tablo ve kolon isimlerine eşleştir. Bu migration'daki `company_source` tabloları çalıştırılabilir referans şemadır. Gerçek şemaya eşleştirdikten sonra şirket DB tarafını kur:
-
-```bash
-npm run db:migrate:company
-npm run db:provision-readonly
-npm run reports:smoke
-```
-
-Read-only rol şu korumaları birlikte kullanır:
-
-- `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `NOINHERIT`
-- Bağlantı limiti `5`
-- `default_transaction_read_only=on`
-- Sorgu timeout'u `5s`
-- Lock timeout'u `2s`
-- Kaynak tablolara erişim yok
-- Yalnızca `assistant_reporting` altındaki üç view için `SELECT`
-- Uygulama kodunda ayrıca `BEGIN READ ONLY`
-
-## 5. WhatsApp'ı açma
-
-Meta test numarası ve webhook hazır olduğunda:
+## WhatsApp ve OpenAI
 
 ```env
 WHATSAPP_ENABLED=true
-WHATSAPP_VERIFY_TOKEN=<rastgele-token>
-WHATSAPP_ACCESS_TOKEN=<meta-access-token>
-WHATSAPP_PHONE_NUMBER_ID=<phone-number-id>
-WHATSAPP_GRAPH_API_VERSION=<Meta-dashboard-sürümü>
-META_APP_SECRET=<meta-app-secret>
+WHATSAPP_VERIFY_TOKEN=<en-az-16-karakter-rastgele-token>
+WHATSAPP_ACCESS_TOKEN=<Meta-System-User-token>
+WHATSAPP_PHONE_NUMBER_ID=<yalnizca-rakam>
+WHATSAPP_GRAPH_API_VERSION=v25.0
+META_APP_SECRET=<Meta-App-Secret>
 REQUIRE_WHATSAPP_SIGNATURE=true
-```
 
-Webhook URL'leri:
-
-```text
-GET  https://<domain>/webhooks/whatsapp
-POST https://<domain>/webhooks/whatsapp
-```
-
-Sunucuyu başlat:
-
-```bash
-npm run dev
-```
-
-Şu mesajlar doğrudan çalışır:
-
-```text
-satış özeti
-aktif projeler
-geciken görevler
-```
-
-Yetkisiz numaranın mesaj içeriği kaydedilmez ve numaraya hiçbir WhatsApp cevabı gönderilmez. Yetkili fakat ilgili kaynağa izni olmayan kullanıcıya erişim reddi cevabı gönderilir.
-
-## 6. MCP sunucusu
-
-WhatsApp uygulaması her mesaj için gerçek bir MCP client/server oturumu açar. Oturum, backend'in whitelist'ten doğruladığı kullanıcıya bağlanır. Modelin tool argümanlarında kullanıcı veya telefon alanı bulunmaz.
-
-MCP araçları:
-
-| Araç | Permission | İşlev |
-|---|---|---|
-| `get_sales_summary` | `company.sales` | Tarih aralığında satış ve iade özeti |
-| `get_active_projects` | `company.projects` | Aktif proje ve görev sayıları |
-| `get_overdue_tasks` | `company.tasks` | Geciken görevler |
-
-Sunucuyu Claude Desktop veya MCP Inspector gibi ayrı bir istemcide stdio üzerinden çalıştırmak için whitelist'teki bir kullanıcıyı servis kimliği olarak seç:
-
-```bash
-MCP_ACTOR_PHONE="+905551234567" npm run mcp:stdio
-```
-
-STDIO sunucusu stdout'a uygulama logu yazmaz; JSON-RPC kanalı korunur. Araç çağrıları yine DB audit tablosuna kaydedilir.
-
-## 7. OpenAI Responses entegrasyonu
-
-`.env` içinde:
-
-```env
 LLM_ENABLED=true
 OPENAI_API_KEY=<project-api-key>
 OPENAI_MODEL=gpt-5.6-terra
@@ -222,46 +205,127 @@ LLM_MAX_OUTPUT_TOKENS=700
 LLM_TIMEOUT_MS=25000
 ```
 
-Akış:
+Webhook:
 
-1. Model MCP araçlarının JSON Schema tanımlarını alır.
-2. Uygun aracı seçip yapılandırılmış argüman üretir.
-3. Backend çağrıyı kullanıcıya bağlı MCP oturumunda çalıştırır.
-4. MCP permission ve input validation uygular.
-5. Tool sonucu Responses API'ye `function_call_output` olarak döner.
-6. Model kısa Türkçe WhatsApp cevabını üretir.
-
-API tarafında `store=false` kullanılır. Model servisi hata verirse desteklenen üç temel komut deterministik yönlendiriciyle cevaplanmaya devam eder.
-
-## 8. Kontroller
-
-```bash
-npm run typecheck
-npm test
-npm run build
+```text
+GET  https://<domain>/webhooks/whatsapp
+POST https://<domain>/webhooks/whatsapp
 ```
 
-Testler şunları kapsar:
+Health endpoint'leri:
 
-- Telefon normalizasyonu ve HMAC hashing
-- Log redaction
-- Meta webhook imzası
-- WhatsApp payload ayrıştırma
-- Whitelist dışı numaraya cevap verilmemesi
-- Permission reddi
-- Üç rapor komutunun yönlendirilmesi
-- PostgreSQL migration'larının gerçek PostgreSQL uyumlu motor üzerinde çalışması
-- Reporting view'larının müşteri seviyesindeki satış bilgisini dışarı çıkarmaması
-- Gerçek in-memory MCP protokolü üzerinden tool listeleme ve çağırma
-- MCP seviyesinde permission reddi ve input validation
-- İki turlu Responses function-calling akışı
-- Model hatasında MCP oturumunun güvenli şekilde kapanması
+```text
+GET /health       # iki DB bağlantısını kontrol eder
+GET /health/live  # process liveness
+```
+
+Desteklenen deterministik komutlar: `satış özeti`, `aktif projeler`, `geciken görevler`. LLM etkinse daha doğal
+sorular MCP function-calling döngüsüne gider; model hatasında deterministik yönlendirici devreye girer.
+
+## Encryption migration ve key rotasyonu
+
+`003_app_data_protection.sql` telefon/mesaj korumasını; `004_identity_lifecycle.sql` ad-soyad, departman,
+WhatsApp mesaj kimliği ve lifecycle indexlerini ekler. Mevcut plaintext satırları şifrelemek veya HMAC blind indexe
+dönüştürmek için:
+
+```bash
+npm run db:migrate:app
+npm run db:encrypt-existing
+```
+
+Anahtar rotasyonu:
+
+1. Eski key'i JSON object içinde tut.
+2. Yeni 32-byte key ekle ve `DATA_ENCRYPTION_ACTIVE_KEY_ID` değerini yeni ID yap.
+3. Backend'i iki key ile deploy et.
+4. `npm run db:encrypt-existing` çalıştır; eski key ID'li telefon, ad-soyad, departman ve mesaj kayıtları aktif key
+   ile yeniden şifrelenir.
+5. DB ve backup'larda eski key'e bağlı veri kalmadığını doğruladıktan sonra eski key'i kaldır.
+
+Key kaybı şifreli veriyi geri döndürülemez yapar. Key'leri GitHub'a, loglara veya image içine koyma; Render secret
+environment variable olarak sakla. DB backup'ları eski plaintext veya eski-key ciphertext içerebileceği için backup
+retention ve erişim politikası ayrıca uygulanmalıdır.
+
+## Veri saklama ve müşteri kapanışı
+
+```env
+MESSAGE_RETENTION_DAYS=30
+MESSAGE_RECORD_RETENTION_DAYS=90
+AUDIT_RETENTION_DAYS=365
+```
+
+Uygulama mesaj gövdesini süresi dolunca otomatik temizler. Runtime rolüne `DELETE` yetkisi verilmez; terminal mesaj
+satırlarını ve audit kayıtlarını silen aşağıdaki admin komutunu ayrı bir günlük cron/job olarak çalıştır:
+
+```bash
+npm run db:purge-expired
+```
+
+Müşteri işi bittiğinde önce servisi durdur, sonra salt-okunur dry-run al:
+
+```bash
+npm run db:erase-client-data
+```
+
+Komutun yazdığı database adını doğruladıktan sonra açık onayla çalıştır:
+
+```bash
+npm run db:erase-client-data -- \
+  --confirm-database <exact-database-name> \
+  --confirm-erase-client-data
+```
+
+Bu komut sadece asistana ait `users`, `permissions`, `messages` ve `audit_events` verisini siler; müşterinin
+kaynak şirket/reporting database'ini silmez. Kapanış ancak encryption/HMAC key'leri, Meta/OpenAI/DB credential'ları,
+loglar, snapshot/backup/WAL kopyaları ve hosting kaynakları da ilgili sağlayıcılarda imha edildiğinde tamamlanır.
+Ayrıntılı ve doğrulanabilir prosedür: [docs/DATA_LIFECYCLE.md](docs/DATA_LIFECYCLE.md).
+
+## Production rollout sırası
+
+Bu değişiklikler mevcut deployment'a uygulanırken:
+
+1. Uygulama DB backup'ı al.
+2. `PHONE_HASH_SECRET`, encryption key-ring, üç retention değeri ve rate-limit env'lerini Render'a ekle.
+3. Backend'i ve worker'ları kısa süre durdur.
+4. `npm run db:migrate:app` çalıştır.
+5. `npm run db:encrypt-existing` ile telefon, ad-soyad, departman, mesaj ve transport-ID
+   plaintext'ini temizle.
+6. Dedicated DB doğrulamasından sonra `npm run db:provision-app-role -- --confirm-dedicated-database` çalıştır ve
+   `DATABASE_URL` değerini restricted role çevir.
+7. Yeni kodu deploy et; `/health` ve `/health/live` kontrol et.
+8. `npm run db:purge-expired` için günlük admin cron/job tanımla.
+9. Meta test numarasıyla authorized, unauthorized, duplicate ve delivery-status senaryolarını doğrula.
+
+Backfill identity ve transport-ID plaintext'ini temizledikten sonra eski uygulama sürümü whitelist lookup/idempotency
+akışını yürütemez. Rollback için DB backup'ını ve encryption destekli bu kod sürümünü birlikte koru.
+
+## Kontroller
+
+```bash
+npm run check
+npm run test:stress
+npm run security:scan
+npm audit --omit=dev --audit-level=moderate
+```
+
+`npm run check` type-check, coverage eşikli testler ve production build'i çalıştırır. Test paketi encryption tamper ve
+rotasyonunu, webhook imzasını, body sınırını, fuzz/batch davranışını, 500 eşzamanlı mesajı, rate limit'i, outbox
+belirsiz-teslimat korumasını, permission/departman kapsamını, MCP protokolünü, LLM tool döngüsünü, migration'ları ve
+read-only rapor sorgularını kapsar.
+
+CI ayrıca tüm Git geçmişinde bilinen credential formatlarını tarar. CodeQL haftalık ve her PR'da çalışır; Dependabot
+npm ve GitHub Actions güncellemeleri açar.
 
 ## Veri güvenliği notları
 
-- `.env` hiçbir zaman Git'e eklenmez.
-- Telefon numarası yalnızca whitelist tablosunda tutulur; mesajlarda HMAC-SHA256 hash bulunur.
-- Uygulama logları mesaj gövdesi, telefon, e-posta, token, parola veya DB bağlantısı içermez.
-- Mesaj içeriği konuşma geçmişi için veritabanında saklanır. Üretim öncesinde şirketin ihtiyacına göre otomatik silme/retention süresi belirlenmelidir.
-- LLM etkinleştirildiğinde model sağlayıcısında API verisinin model eğitimi için kullanılmadığı kurumsal ayar doğrulanmalıdır.
-- Model hiçbir zaman actor ID veya telefon numarasını tool argümanı olarak belirlemez; kimlik yalnızca backend oturum bağlamındadır.
+- `.env`, gerçek token/key, gerçek telefon, mesaj gövdesi ve şirket verisi Git'e eklenmez.
+- Yetkili mesaj içeriği yalnızca ciphertext olarak tutulur; kimlik ve transport ID alanları da plaintext değildir.
+- Süresi dolan mesaj gövdesi/metadata minimize edilir; terminal mesaj ve audit satırları admin purge ile silinir.
+- Yetkisiz mesaj içeriği DB'ye yazılmaz.
+- Audit kayıtlarında ham telefon yerine kısa pseudonymous reference bulunur.
+- Model tool argümanında kullanıcı ID'si veya telefon bulunmaz; actor backend oturumuna bağlıdır.
+- Reporting view'ları müşteri seviyesindeki satış verisini dışarı çıkarmaz.
+- LLM sağlayıcısında API verisinin model eğitimi için kullanılmadığı kurumsal ayar ayrıca doğrulanmalıdır.
+- Gerçek secret yanlışlıkla paylaşılırsa history scan sonucuna güvenmeden secret derhal revoke/rotate edilmelidir.
+
+Güvenlik açığı raporlama kuralları için [SECURITY.md](SECURITY.md) dosyasına bak.

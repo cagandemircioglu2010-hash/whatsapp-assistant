@@ -1,10 +1,20 @@
-import type { CountryCode } from "libphonenumber-js";
+import { isSupportedCountry, type CountryCode } from "libphonenumber-js";
 import { z } from "zod";
+import { parseDataEncryptionConfig, type DataEncryptionConfig } from "../security/encryption.js";
 
 const booleanFromString = z
   .enum(["true", "false"])
   .default("false")
   .transform((value) => value === "true");
+
+const postgresUrl = z.string().url().refine((value) => {
+  const protocol = new URL(value).protocol;
+  return protocol === "postgres:" || protocol === "postgresql:";
+}, "Must be a PostgreSQL URL");
+
+function looksLikeWeakSecret(value: string): boolean {
+  return /replace|changeme|example|password|secret/i.test(value) || new Set(value).size < 8;
+}
 
 const schema = z
   .object({
@@ -12,12 +22,20 @@ const schema = z
     HOST: z.string().default("0.0.0.0"),
     PORT: z.coerce.number().int().min(1).max(65535).default(3000),
     LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
-    DATABASE_URL: z.string().url(),
-    COMPANY_READONLY_DATABASE_URL: z.string().url(),
+    DATABASE_URL: postgresUrl,
+    COMPANY_READONLY_DATABASE_URL: postgresUrl,
     DATABASE_SSL: booleanFromString,
     PHONE_HASH_SECRET: z.string().min(32),
     DEFAULT_PHONE_COUNTRY: z.string().length(2).default("TR"),
     COMPANY_TIMEZONE: z.string().default("Europe/Istanbul"),
+    DATA_ENCRYPTION_ACTIVE_KEY_ID: z.string().optional(),
+    DATA_ENCRYPTION_KEYS: z.string().optional(),
+    MESSAGE_RETENTION_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+    MESSAGE_RECORD_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(90),
+    AUDIT_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(365),
+    WEBHOOK_BODY_LIMIT_BYTES: z.coerce.number().int().min(16_384).max(1_048_576).default(262_144),
+    USER_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).max(120).default(20),
+    MESSAGE_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(4),
     WHATSAPP_ENABLED: booleanFromString,
     WHATSAPP_VERIFY_TOKEN: z.string().optional(),
     WHATSAPP_ACCESS_TOKEN: z.string().optional(),
@@ -39,6 +57,66 @@ const schema = z
     LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(25000)
   })
   .superRefine((env, context) => {
+    if (!isSupportedCountry(env.DEFAULT_PHONE_COUNTRY.toUpperCase() as CountryCode)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["DEFAULT_PHONE_COUNTRY"],
+        message: "DEFAULT_PHONE_COUNTRY is not supported"
+      });
+    }
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: env.COMPANY_TIMEZONE }).format();
+    } catch {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["COMPANY_TIMEZONE"],
+        message: "COMPANY_TIMEZONE is not a valid IANA timezone"
+      });
+    }
+
+    const encryptionRequired = env.NODE_ENV === "production" || env.WHATSAPP_ENABLED;
+    if (encryptionRequired && (!env.DATA_ENCRYPTION_ACTIVE_KEY_ID || !env.DATA_ENCRYPTION_KEYS)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["DATA_ENCRYPTION_KEYS"],
+        message: "Data encryption keys are required in production and when WhatsApp is enabled"
+      });
+    } else if (env.DATA_ENCRYPTION_ACTIVE_KEY_ID || env.DATA_ENCRYPTION_KEYS) {
+      if (!env.DATA_ENCRYPTION_ACTIVE_KEY_ID || !env.DATA_ENCRYPTION_KEYS) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["DATA_ENCRYPTION_KEYS"],
+          message: "Both data encryption key settings must be provided"
+        });
+      } else {
+        try {
+          parseDataEncryptionConfig(env.DATA_ENCRYPTION_KEYS, env.DATA_ENCRYPTION_ACTIVE_KEY_ID);
+        } catch (error) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["DATA_ENCRYPTION_KEYS"],
+            message: error instanceof Error ? error.message : "Encryption key configuration is invalid"
+          });
+        }
+      }
+    }
+
+    if (env.NODE_ENV === "production" && looksLikeWeakSecret(env.PHONE_HASH_SECRET)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["PHONE_HASH_SECRET"],
+        message: "PHONE_HASH_SECRET is too predictable for production"
+      });
+    }
+
+    if (env.MESSAGE_RECORD_RETENTION_DAYS < env.MESSAGE_RETENTION_DAYS) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["MESSAGE_RECORD_RETENTION_DAYS"],
+        message: "Message record retention cannot be shorter than message content retention"
+      });
+    }
+
     if (env.WHATSAPP_ENABLED) {
       const required = [
         ["WHATSAPP_VERIFY_TOKEN", env.WHATSAPP_VERIFY_TOKEN],
@@ -56,11 +134,47 @@ const schema = z
         }
       }
 
+      if (env.WHATSAPP_VERIFY_TOKEN && env.WHATSAPP_VERIFY_TOKEN.length < 16) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["WHATSAPP_VERIFY_TOKEN"],
+          message: "WHATSAPP_VERIFY_TOKEN must contain at least 16 characters"
+        });
+      }
+      if (env.WHATSAPP_ACCESS_TOKEN && env.WHATSAPP_ACCESS_TOKEN.length < 20) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["WHATSAPP_ACCESS_TOKEN"],
+          message: "WHATSAPP_ACCESS_TOKEN is unexpectedly short"
+        });
+      }
+      if (env.WHATSAPP_PHONE_NUMBER_ID && !/^\d{5,30}$/.test(env.WHATSAPP_PHONE_NUMBER_ID)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["WHATSAPP_PHONE_NUMBER_ID"],
+          message: "WHATSAPP_PHONE_NUMBER_ID must contain only digits"
+        });
+      }
+
       if (env.REQUIRE_WHATSAPP_SIGNATURE && !env.META_APP_SECRET) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["META_APP_SECRET"],
           message: "META_APP_SECRET is required when webhook signature verification is enabled"
+        });
+      }
+      if (env.NODE_ENV === "production" && !env.REQUIRE_WHATSAPP_SIGNATURE) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["REQUIRE_WHATSAPP_SIGNATURE"],
+          message: "Webhook signature verification cannot be disabled in production"
+        });
+      }
+      if (env.META_APP_SECRET && env.META_APP_SECRET.length < 16) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["META_APP_SECRET"],
+          message: "META_APP_SECRET is unexpectedly short"
         });
       }
     }
@@ -70,6 +184,13 @@ const schema = z
         code: z.ZodIssueCode.custom,
         path: ["OPENAI_API_KEY"],
         message: "OPENAI_API_KEY is required when LLM_ENABLED=true"
+      });
+    }
+    if (env.LLM_ENABLED && env.NODE_ENV === "production" && (env.OPENAI_API_KEY?.length ?? 0) < 20) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["OPENAI_API_KEY"],
+        message: "OPENAI_API_KEY is unexpectedly short"
       });
     }
   });
@@ -85,6 +206,13 @@ export type AppConfig = {
   phoneHashSecret: string;
   defaultPhoneCountry: CountryCode;
   companyTimezone: string;
+  dataEncryption: DataEncryptionConfig | null;
+  messageRetentionDays: number;
+  messageRecordRetentionDays: number;
+  auditRetentionDays: number;
+  webhookBodyLimitBytes: number;
+  userRateLimitPerMinute: number;
+  messageWorkerConcurrency: number;
   whatsapp: {
     enabled: boolean;
     verifyToken?: string;
@@ -107,6 +235,10 @@ export type AppConfig = {
 
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppConfig {
   const env = schema.parse(environment);
+  const dataEncryption =
+    env.DATA_ENCRYPTION_ACTIVE_KEY_ID && env.DATA_ENCRYPTION_KEYS
+      ? parseDataEncryptionConfig(env.DATA_ENCRYPTION_KEYS, env.DATA_ENCRYPTION_ACTIVE_KEY_ID)
+      : null;
 
   return {
     nodeEnv: env.NODE_ENV,
@@ -119,6 +251,13 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     phoneHashSecret: env.PHONE_HASH_SECRET,
     defaultPhoneCountry: env.DEFAULT_PHONE_COUNTRY.toUpperCase() as CountryCode,
     companyTimezone: env.COMPANY_TIMEZONE,
+    dataEncryption,
+    messageRetentionDays: env.MESSAGE_RETENTION_DAYS,
+    messageRecordRetentionDays: env.MESSAGE_RECORD_RETENTION_DAYS,
+    auditRetentionDays: env.AUDIT_RETENTION_DAYS,
+    webhookBodyLimitBytes: env.WEBHOOK_BODY_LIMIT_BYTES,
+    userRateLimitPerMinute: env.USER_RATE_LIMIT_PER_MINUTE,
+    messageWorkerConcurrency: env.MESSAGE_WORKER_CONCURRENCY,
     whatsapp: {
       enabled: env.WHATSAPP_ENABLED,
       ...(env.WHATSAPP_VERIFY_TOKEN ? { verifyToken: env.WHATSAPP_VERIFY_TOKEN } : {}),

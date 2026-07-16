@@ -34,6 +34,22 @@ function formatMoney(amount: string, currency: string): string {
   return new Intl.NumberFormat("tr-TR", { style: "currency", currency }).format(numeric);
 }
 
+const crossDepartmentRoles = new Set(["manager", "executive", "admin"]);
+
+function departmentScope(user: AuthorizedUser, resource: string): string | undefined {
+  if (crossDepartmentRoles.has(user.role.toLowerCase())) return undefined;
+  if (!user.department) throw new PermissionDeniedError(resource);
+  return user.department;
+}
+
+function safeDisplayText(value: string, maxLength = 120): string {
+  return value
+    .replace(/[\u0000-\u001F\u007F\u202A-\u202E\u2066-\u2069]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
 export class ReportCommandRouter implements AssistantResponder {
   constructor(
     private readonly reports: CompanyReports,
@@ -69,11 +85,15 @@ export class ReportCommandRouter implements AssistantResponder {
 
       if (command.includes("proje") && (command.includes("aktif") || command.includes("durum"))) {
         await this.authorization.require(user.id, reportResources.projects);
-        const projects = await this.reports.getActiveProjects({ limit: 10 });
+        const department = departmentScope(user, reportResources.projects);
+        const projects = await this.reports.getActiveProjects({
+          limit: 10,
+          ...(department ? { department } : {})
+        });
         const lines = projects.length
           ? projects.map(
               (project) =>
-                `• ${project.name} — ${project.status}, ${project.openTaskCount} açık görev, ${project.overdueTaskCount} gecikmiş`
+                `• ${safeDisplayText(project.name)} — ${safeDisplayText(project.status)}, ${project.openTaskCount} açık görev, ${project.overdueTaskCount} gecikmiş`
             )
           : ["Aktif proje bulunamadı."];
         return {
@@ -86,10 +106,15 @@ export class ReportCommandRouter implements AssistantResponder {
 
       if (command.includes("gecik") && command.includes("gorev")) {
         await this.authorization.require(user.id, reportResources.tasks);
-        const tasks = await this.reports.getOverdueTasks({ limit: 10 });
+        const department = departmentScope(user, reportResources.tasks);
+        const tasks = await this.reports.getOverdueTasks({
+          limit: 10,
+          ...(department ? { department } : {})
+        });
         const lines = tasks.length
           ? tasks.map(
-              (task) => `• ${task.title} (${task.projectName}) — ${task.daysOverdue} gün, ${task.priority}`
+              (task) =>
+                `• ${safeDisplayText(task.title)} (${safeDisplayText(task.projectName)}) — ${task.daysOverdue} gün, ${safeDisplayText(task.priority, 20)}`
             )
           : ["Geciken görev bulunamadı."];
         return {

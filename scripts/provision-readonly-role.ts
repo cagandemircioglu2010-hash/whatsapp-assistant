@@ -7,6 +7,7 @@ const { Pool } = pg;
 const adminUrl = process.env.COMPANY_DATABASE_ADMIN_URL ?? process.env.DATABASE_ADMIN_URL;
 const roleName = process.env.COMPANY_READONLY_USER;
 const rolePassword = process.env.COMPANY_READONLY_PASSWORD;
+const dedicatedDatabaseConfirmed = process.argv.includes("--confirm-dedicated-database");
 
 if (!adminUrl) throw new Error("COMPANY_DATABASE_ADMIN_URL or DATABASE_ADMIN_URL must be set");
 if (!roleName || !/^[a-z][a-z0-9_]{2,62}$/.test(roleName)) {
@@ -14,6 +15,11 @@ if (!roleName || !/^[a-z][a-z0-9_]{2,62}$/.test(roleName)) {
 }
 if (!rolePassword || rolePassword.length < 20) {
   throw new Error("COMPANY_READONLY_PASSWORD must contain at least 20 characters");
+}
+if (!dedicatedDatabaseConfirmed) {
+  throw new Error(
+    "Pass --confirm-dedicated-database after verifying that PUBLIC privilege revocation will not affect other applications"
+  );
 }
 
 const ssl = process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: true } : false;
@@ -52,10 +58,19 @@ try {
   await client.query(format("ALTER ROLE %I SET default_transaction_read_only = on", roleName));
   await client.query(format("ALTER ROLE %I SET statement_timeout = '5s'", roleName));
   await client.query(format("ALTER ROLE %I SET lock_timeout = '2s'", roleName));
+  await client.query(format("ALTER ROLE %I SET idle_in_transaction_session_timeout = '10s'", roleName));
+  await client.query(format("ALTER ROLE %I SET search_path = pg_catalog, assistant_reporting", roleName));
   await client.query(format("GRANT CONNECT ON DATABASE %I TO %I", databaseName, roleName));
+  await client.query(format("REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC", databaseName));
 
+  await client.query("REVOKE CREATE ON SCHEMA public FROM PUBLIC");
+  await client.query(format("REVOKE CREATE ON SCHEMA public FROM %I", roleName));
+  await client.query(format("REVOKE USAGE ON SCHEMA public FROM %I", roleName));
+  await client.query(format("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %I", roleName));
   await client.query(format("REVOKE ALL ON SCHEMA company_source FROM %I", roleName));
   await client.query(format("REVOKE ALL ON ALL TABLES IN SCHEMA company_source FROM %I", roleName));
+  await client.query(format("REVOKE ALL ON SCHEMA assistant_reporting FROM %I", roleName));
+  await client.query(format("REVOKE ALL ON ALL TABLES IN SCHEMA assistant_reporting FROM %I", roleName));
   await client.query(format("GRANT USAGE ON SCHEMA assistant_reporting TO %I", roleName));
   await client.query(
     format(

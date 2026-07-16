@@ -4,9 +4,11 @@ services:
     environment:
       POSTGRES_DB: company_assistant
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d company_assistant"]
       interval: 3s
@@ -14,6 +16,7 @@ services:
       retries: 10
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    stop_grace_period: 30s
 
 volumes:
   postgres-data:

@@ -20,6 +20,7 @@ class FakePermissions implements PermissionLookup {
 }
 
 class FakeReports implements CompanyReports {
+  lastProjectDepartment: string | undefined;
   async getSalesSummary(input: { startDate: string; endDate: string }): Promise<SalesSummary> {
     return {
       ...input,
@@ -35,7 +36,8 @@ class FakeReports implements CompanyReports {
       generatedAt: new Date().toISOString()
     };
   }
-  async getActiveProjects(): Promise<ActiveProject[]> {
+  async getActiveProjects(input: { limit?: number; department?: string } = {}): Promise<ActiveProject[]> {
+    this.lastProjectDepartment = input.department;
     return [
       {
         id: "project-1",
@@ -82,5 +84,16 @@ describe("report command router", () => {
       resources: ["company.projects"],
       text: "Bu bilgiye erişim yetkiniz bulunmuyor."
     });
+  });
+
+  it("forces employee project queries into the employee department", async () => {
+    const reports = new FakeReports();
+    const router = new ReportCommandRouter(
+      reports,
+      new AuthorizationService(new FakePermissions(true)),
+      "Europe/Istanbul"
+    );
+    await router.handle(user, "aktif projeler");
+    expect(reports.lastProjectDepartment).toBe("Sales");
   });
 });

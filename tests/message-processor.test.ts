@@ -14,6 +14,7 @@ import type {
 import type { CompanyReports } from "../src/reports/company-report.repository.js";
 import { ReportCommandRouter } from "../src/reports/report-command-router.js";
 import type { WhatsAppSender } from "../src/whatsapp/types.js";
+import { WhatsAppDeliveryUncertainError } from "../src/whatsapp/client.js";
 
 class MemoryMessages implements MessageStore {
   inbound: SaveInboundInput[] = [];
@@ -57,7 +58,13 @@ const reports: CompanyReports = {
   getOverdueTasks: async () => []
 };
 
-function processor(users: UserLookup, messages: MemoryMessages, audit: MemoryAudit, sender: MemorySender) {
+function processor(
+  users: UserLookup,
+  messages: MemoryMessages,
+  audit: MemoryAudit,
+  sender: WhatsAppSender,
+  rateLimitPerMinute = 20
+) {
   return new MessageProcessor({
     users,
     messages,
@@ -66,7 +73,8 @@ function processor(users: UserLookup, messages: MemoryMessages, audit: MemoryAud
     router: new ReportCommandRouter(reports, new AuthorizationService(permissions), "Europe/Istanbul"),
     logger: createLogger("silent"),
     phoneHashSecret: "x".repeat(32),
-    defaultCountry: "TR"
+    defaultCountry: "TR",
+    rateLimitPerMinute
   });
 }
 
@@ -115,5 +123,73 @@ describe("message processor", () => {
     expect(messages.outbound[0]?.content).toContain("satış");
     expect(messages.statuses).toEqual(["processed"]);
     expect(sender.calls).toHaveLength(1);
+  });
+
+  it("rate-limits repeated authorized work before calling reports or WhatsApp", async () => {
+    const messages = new MemoryMessages();
+    const audit = new MemoryAudit();
+    const sender = new MemorySender();
+    const users: UserLookup = {
+      findActiveByPhone: async () => ({
+        id: "rate-user",
+        fullName: "Rate User",
+        department: "Sales",
+        role: "employee"
+      })
+    };
+    const instance = processor(users, messages, audit, sender, 1);
+    const incoming = {
+      externalMessageId: "wamid.rate.1",
+      from: "905551234567",
+      type: "text",
+      text: "Satış özeti",
+      timestamp: "1700000000"
+    };
+
+    expect(await instance.process(incoming)).toBe("processed");
+    expect(await instance.process({ ...incoming, externalMessageId: "wamid.rate.2" })).toBe("rate_limited");
+    expect(sender.calls).toHaveLength(1);
+    expect(audit.events.some((event) => event.eventType === "whatsapp.rate_limit")).toBe(true);
+  });
+
+  it("suppresses automatic retries when the delivery result is uncertain", async () => {
+    class OutboxMessages extends MemoryMessages {
+      unknown = false;
+      async reserveOutbound() {
+        return { id: "outbox-1", status: "sending", shouldSend: true };
+      }
+      async markOutboundSent(): Promise<void> {}
+      async markOutboundFailed(): Promise<void> {}
+      async markOutboundDeliveryUnknown(): Promise<void> {
+        this.unknown = true;
+      }
+    }
+    const messages = new OutboxMessages();
+    const audit = new MemoryAudit();
+    const users: UserLookup = {
+      findActiveByPhone: async () => ({
+        id: "user-1",
+        fullName: "Test User",
+        department: "Sales",
+        role: "employee"
+      })
+    };
+    const uncertainSender: WhatsAppSender = {
+      sendText: async () => {
+        throw new WhatsAppDeliveryUncertainError();
+      }
+    };
+
+    const result = await processor(users, messages, audit, uncertainSender).process({
+      externalMessageId: "wamid.uncertain",
+      from: "905551234567",
+      type: "text",
+      text: "Satış özeti",
+      timestamp: "1700000000"
+    });
+    expect(result).toBe("delivery_unknown");
+    expect(messages.unknown).toBe(true);
+    expect(messages.statuses.at(-1)).toBe("processed");
+    expect(audit.events.some((event) => event.eventType === "whatsapp.delivery")).toBe(true);
   });
 });

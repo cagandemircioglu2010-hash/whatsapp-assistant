@@ -25,14 +25,21 @@ describe("log redaction", () => {
       phoneNumber: "+90 555 123 45 67",
       nested: {
         content: "internal company message",
-        note: "Contact person@example.com or use Bearer secret-token"
-      }
+        note: "Contact person@example.com or use Bearer secret-token",
+        openaiApiKey: "must-not-appear"
+      },
+      packet: Buffer.from("binary secret")
     });
 
     expect(result).toEqual({
       messageId: "wamid.123",
       phoneNumber: "[REDACTED]",
-      nested: { content: "[REDACTED]", note: "Contact [REDACTED] or use [REDACTED]" }
+      nested: {
+        content: "[REDACTED]",
+        note: "Contact [REDACTED] or use [REDACTED]",
+        openaiApiKey: "[REDACTED]"
+      },
+      packet: "[REDACTED_BINARY]"
     });
     expect(redactString("postgresql://admin:secret@db.local/company")).toBe("[REDACTED]");
   });

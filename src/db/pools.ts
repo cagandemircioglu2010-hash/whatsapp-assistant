@@ -10,6 +10,12 @@ type PoolOptions = {
 };
 
 export function createDatabasePool(connectionString: string, options: PoolOptions): Pool {
+  const sessionOptions = [
+    `-c statement_timeout=${options.forceReadOnly ? 5000 : 10000}`,
+    "-c lock_timeout=2000",
+    "-c idle_in_transaction_session_timeout=10000",
+    ...(options.forceReadOnly ? ["-c default_transaction_read_only=on"] : [])
+  ].join(" ");
   return new PgPool({
     connectionString,
     application_name: options.applicationName,
@@ -17,9 +23,7 @@ export function createDatabasePool(connectionString: string, options: PoolOption
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
     ssl: options.ssl ? { rejectUnauthorized: true } : false,
-    ...(options.forceReadOnly
-      ? { options: "-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=2000" }
-      : {})
+    options: sessionOptions
   });
 }
 

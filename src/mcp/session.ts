@@ -3,7 +3,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AuthorizedUser } from "../auth/types.js";
 import type { AssistantContext } from "../assistant/types.js";
-import { createCompanyMcpServer } from "./company-server.js";
+import { companyToolResources, createCompanyMcpServer } from "./company-server.js";
 import type { CompanyReports } from "../reports/company-report.repository.js";
 import type { AuditStore } from "../messages/audit.repository.js";
 import type { AuthorizationService } from "../auth/authorization.service.js";
@@ -39,16 +39,19 @@ type FactoryDependencies = {
 class InMemoryCompanyMcpSession implements CompanyMcpSession {
   constructor(
     private readonly client: Client,
-    private readonly server: McpServer
+    private readonly server: McpServer,
+    private readonly allowedToolNames: ReadonlySet<string>
   ) {}
 
   async listTools(): Promise<McpToolDescriptor[]> {
     const result = await this.client.listTools();
-    return result.tools.map((tool) => ({
-      name: tool.name,
-      ...(tool.description ? { description: tool.description } : {}),
-      inputSchema: tool.inputSchema as Record<string, unknown>
-    }));
+    return result.tools
+      .filter((tool) => this.allowedToolNames.has(tool.name))
+      .map((tool) => ({
+        name: tool.name,
+        ...(tool.description ? { description: tool.description } : {}),
+        inputSchema: tool.inputSchema as Record<string, unknown>
+      }));
   }
 
   async callTool(name: string, arguments_: Record<string, unknown>): Promise<McpToolResult> {
@@ -72,6 +75,13 @@ export class CompanyMcpSessionFactory implements CompanyMcpSessionFactoryLike {
   constructor(private readonly dependencies: FactoryDependencies) {}
 
   async open(actor: AuthorizedUser, context: AssistantContext): Promise<CompanyMcpSession> {
+    const toolResourceEntries = Object.entries(companyToolResources);
+    const permissionChecks = await Promise.all(
+      toolResourceEntries.map(([, resource]) => this.dependencies.authorization.isAllowed(actor.id, resource))
+    );
+    const allowedToolNames = new Set(
+      toolResourceEntries.filter((_, index) => permissionChecks[index]).map(([toolName]) => toolName)
+    );
     const server = createCompanyMcpServer({
       actor,
       messageId: context.messageId,
@@ -82,6 +92,6 @@ export class CompanyMcpSessionFactory implements CompanyMcpSessionFactoryLike {
     const client = new Client({ name: "whatsapp-company-assistant", version: "0.2.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-    return new InMemoryCompanyMcpSession(client, server);
+    return new InMemoryCompanyMcpSession(client, server, allowedToolNames);
   }
 }

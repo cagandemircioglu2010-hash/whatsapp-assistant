@@ -14,6 +14,8 @@ export function createLogger(level: string): Logger {
         "request.headers.cookie",
         "*.accessToken",
         "*.appSecret",
+        "*.phoneHashSecret",
+        "*.dataEncryptionKeys",
         "*.databaseUrl",
         "*.phone",
         "*.phoneNumber",
