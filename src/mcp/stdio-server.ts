@@ -9,6 +9,7 @@ import { AuditRepository } from "../messages/audit.repository.js";
 import { CompanyReportRepository } from "../reports/company-report.repository.js";
 import { normalizePhoneNumber } from "../security/phone.js";
 import { createCompanyMcpServer } from "./company-server.js";
+import { EnvelopeEncryption } from "../security/encryption.js";
 
 const config = loadConfig();
 const rawActorPhone = process.env.MCP_ACTOR_PHONE;
@@ -29,7 +30,8 @@ const readonlyPool = createDatabasePool(config.companyReadonlyDatabaseUrl, {
 });
 
 try {
-  const users = new UserRepository(appPool);
+  const encryption = config.dataEncryption ? new EnvelopeEncryption(config.dataEncryption) : null;
+  const users = new UserRepository(appPool, config.phoneHashSecret, encryption);
   const actor = await users.findActiveByPhone(actorPhone);
   if (!actor) throw new Error("MCP actor is not an active whitelisted user");
 

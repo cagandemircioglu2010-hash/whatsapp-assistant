@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { parseIncomingMessages } from "../src/whatsapp/webhook-parser.js";
+import {
+  parseIncomingMessages,
+  parseMessageStatusUpdates
+} from "../src/whatsapp/webhook-parser.js";
 
 describe("WhatsApp webhook parser", () => {
   it("extracts inbound text messages and ignores status-only events", () => {
@@ -40,5 +43,28 @@ describe("WhatsApp webhook parser", () => {
   it("returns an empty list for malformed payloads", () => {
     expect(parseIncomingMessages(null)).toEqual([]);
     expect(parseIncomingMessages({ entry: "invalid" })).toEqual([]);
+  });
+
+  it("extracts and bounds outbound delivery status updates", () => {
+    const payload = {
+      entry: [
+        {
+          changes: [
+            {
+              value: {
+                statuses: [
+                  { id: "wamid.out", status: "delivered", timestamp: "1700000001" },
+                  { id: "wamid.out", status: "delivered", timestamp: "1700000001" },
+                  { id: "wamid.bad", status: "invented", timestamp: "1700000002" }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    };
+    expect(parseMessageStatusUpdates(payload)).toEqual([
+      { externalMessageId: "wamid.out", status: "delivered", timestamp: "1700000001" }
+    ]);
   });
 });

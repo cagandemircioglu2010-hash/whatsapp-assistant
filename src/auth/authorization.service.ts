@@ -11,8 +11,12 @@ export class PermissionDeniedError extends Error {
 export class AuthorizationService {
   constructor(private readonly permissions: PermissionLookup) {}
 
+  async isAllowed(userId: string, resource: string, action: PermissionAction = "read"): Promise<boolean> {
+    return this.permissions.has(userId, resource, action);
+  }
+
   async require(userId: string, resource: string, action: PermissionAction = "read"): Promise<void> {
-    if (!(await this.permissions.has(userId, resource, action))) {
+    if (!(await this.isAllowed(userId, resource, action))) {
       throw new PermissionDeniedError(resource);
     }
   }

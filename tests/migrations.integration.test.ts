@@ -3,14 +3,18 @@ import { PGlite } from "@electric-sql/pglite";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CompanyReportRepository } from "../src/reports/company-report.repository.js";
+import { EnvelopeEncryption, parseDataEncryptionConfig } from "../src/security/encryption.js";
+import { MessageRepository } from "../src/messages/message.repository.js";
 
 const db = new PGlite();
 
 beforeAll(async () => {
   const identityMigration = await readFile(new URL("../migrations/001_identity_messages.sql", import.meta.url), "utf8");
   const reportingMigration = await readFile(new URL("../migrations/002_company_reporting.sql", import.meta.url), "utf8");
+  const protectionMigration = await readFile(new URL("../migrations/003_app_data_protection.sql", import.meta.url), "utf8");
   await db.exec(identityMigration);
   await db.exec(reportingMigration);
+  await db.exec(protectionMigration);
 });
 
 afterAll(async () => {
@@ -75,6 +79,77 @@ describe("PostgreSQL migrations", () => {
     expect(Number(projects.rows[0]?.overdue_task_count)).toBe(1);
     expect(tasks.rows[0]).toMatchObject({ title: "Security review", days_overdue: 2 });
     expect(JSON.stringify(sales.rows)).not.toContain("PRIVATE-CUSTOMER");
+  });
+
+  it("stores new message content only as authenticated ciphertext", async () => {
+    const user = await db.query<{ id: string }>("SELECT id FROM users LIMIT 1");
+    const userId = user.rows[0]?.id;
+    expect(userId).toBeTruthy();
+    const encryption = new EnvelopeEncryption(
+      parseDataEncryptionConfig(
+        JSON.stringify({ test: Buffer.alloc(32, 4).toString("base64") }),
+        "test"
+      )
+    );
+    const poolAdapter = {
+      query: (sql: string, parameters?: unknown[]) => db.query(sql, parameters)
+    } as unknown as Pool;
+    const messages = new MessageRepository(poolAdapter, encryption);
+
+    const inbound = await messages.saveInbound({
+      externalMessageId: "wamid.encrypted",
+      userId: userId!,
+      content: "Gizli şirket mesajı",
+      senderPhoneHash: "c".repeat(64),
+      messageType: "text"
+    });
+    const stored = await db.query<{ content: string | null; content_ciphertext: string | null }>(
+      "SELECT content, content_ciphertext FROM messages WHERE external_message_id = 'wamid.encrypted'"
+    );
+    expect(stored.rows[0]?.content).toBeNull();
+    expect(stored.rows[0]?.content_ciphertext).toMatch(/^v1\.test\./);
+    expect(stored.rows[0]?.content_ciphertext).not.toContain("Gizli");
+
+    const history = await messages.listRecentForUser(userId!, 10);
+    expect(history.find((row) => row.external_message_id === "wamid.encrypted")?.content).toBe(
+      "Gizli şirket mesajı"
+    );
+
+    const reservation = await messages.reserveOutbound({
+      replyToMessageId: inbound.id,
+      userId: userId!,
+      content: "Şifreli cevap",
+      senderPhoneHash: "c".repeat(64)
+    });
+    expect(reservation).toMatchObject({ status: "sending", shouldSend: true });
+    const concurrentReservation = await messages.reserveOutbound({
+      replyToMessageId: inbound.id,
+      userId: userId!,
+      content: "Şifreli cevap",
+      senderPhoneHash: "c".repeat(64)
+    });
+    expect(concurrentReservation).toMatchObject({
+      id: reservation.id,
+      status: "sending",
+      shouldSend: false
+    });
+
+    await messages.markOutboundSent(reservation.id, "wamid.encrypted.out");
+    const afterDelivery = await messages.reserveOutbound({
+      replyToMessageId: inbound.id,
+      userId: userId!,
+      content: "Şifreli cevap",
+      senderPhoneHash: "c".repeat(64)
+    });
+    expect(afterDelivery).toMatchObject({ status: "sent", shouldSend: false });
+    await expect(messages.updateOutboundStatus("wamid.encrypted.out", "delivered")).resolves.toMatchObject({
+      id: reservation.id
+    });
+    const outboxCount = await db.query<{ count: number }>(
+      "SELECT COUNT(*)::integer AS count FROM messages WHERE reply_to_message_id = $1",
+      [inbound.id]
+    );
+    expect(Number(outboxCount.rows[0]?.count)).toBe(1);
   });
 
   it("executes the three repository queries inside read-only transactions", async () => {

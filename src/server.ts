@@ -20,15 +20,34 @@ const companyReadonlyPool = createDatabasePool(config.companyReadonlyDatabaseUrl
 
 const app = await buildApp({ config, appPool, companyReadonlyPool, logger });
 
-async function shutdown(signal: string): Promise<void> {
-  logSafe(logger, "info", { signal }, "Shutting down");
-  await app.close();
-  await Promise.all([appPool.end(), companyReadonlyPool.end()]);
-  process.exit(0);
+let shutdownPromise: Promise<void> | null = null;
+
+function shutdown(signal: string, exitCode = 0): Promise<void> {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    logSafe(logger, "info", { signal }, "Shutting down");
+    try {
+      await app.close();
+      await Promise.all([appPool.end(), companyReadonlyPool.end()]);
+      process.exitCode = exitCode;
+    } catch (error) {
+      logSafe(logger, "error", { error }, "Graceful shutdown failed");
+      process.exitCode = 1;
+    }
+  })();
+  return shutdownPromise;
 }
 
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
 process.once("SIGINT", () => void shutdown("SIGINT"));
+process.once("unhandledRejection", (error) => {
+  logSafe(logger, "error", { error }, "Unhandled rejection");
+  void shutdown("unhandledRejection", 1);
+});
+process.once("uncaughtException", (error) => {
+  logSafe(logger, "error", { error }, "Uncaught exception");
+  void shutdown("uncaughtException", 1);
+});
 
 try {
   await app.listen({ host: config.host, port: config.port });

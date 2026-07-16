@@ -10,7 +10,11 @@ export function normalizePhoneNumber(input: string, defaultCountry: CountryCode 
 }
 
 export function hashPhoneIdentifier(phone: string, secret: string): string {
-  return createHmac("sha256", secret).update(phone).digest("hex");
+  return createHmac("sha256", secret).update("phone-identifier\u0000").update(phone).digest("hex");
+}
+
+export function hashOpaqueIdentifier(value: string, secret: string, purpose: string): string {
+  return createHmac("sha256", secret).update(purpose).update("\u0000").update(value).digest("hex");
 }
 
 export function phoneLastFour(phone: string): string {

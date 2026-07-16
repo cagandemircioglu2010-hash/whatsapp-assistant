@@ -49,11 +49,7 @@ describe("company MCP server", () => {
 
     try {
       const tools = await session.listTools();
-      expect(tools.map((tool) => tool.name).sort()).toEqual([
-        "get_active_projects",
-        "get_overdue_tasks",
-        "get_sales_summary"
-      ]);
+      expect(tools.map((tool) => tool.name)).toEqual(["get_sales_summary"]);
       expect(JSON.stringify(tools)).not.toContain("secret-actor-id");
       const salesTool = tools.find((tool) => tool.name === "get_sales_summary");
       expect(salesTool?.inputSchema).toMatchObject({

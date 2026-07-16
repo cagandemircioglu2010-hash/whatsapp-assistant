@@ -1,6 +1,9 @@
-import type { IncomingWhatsAppMessage } from "./types.js";
+import type { IncomingWhatsAppMessage, WhatsAppMessageStatus } from "./types.js";
 
 type UnknownRecord = Record<string, unknown>;
+const MAX_ITEMS_PER_LEVEL = 100;
+const MAX_EVENTS_PER_PAYLOAD = 100;
+const MAX_TEXT_LENGTH = 4096;
 
 function record(value: unknown): UnknownRecord | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -12,12 +15,27 @@ function string(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
+function boundedArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value.slice(0, MAX_ITEMS_PER_LEVEL) : [];
+}
+
+function safeText(value: string): string {
+  return value
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .replace(/[\u202A-\u202E\u2066-\u2069]/g, "")
+    .slice(0, MAX_TEXT_LENGTH);
+}
+
+function validMessageId(value: string | null): value is string {
+  return Boolean(value && value.length <= 512 && !/[\u0000-\u001F\u007F]/.test(value));
+}
+
 function extractText(message: UnknownRecord, type: string): string {
-  if (type === "text") return string(record(message.text)?.body) ?? "";
-  if (type === "button") return string(record(message.button)?.text) ?? "";
+  if (type === "text") return safeText(string(record(message.text)?.body) ?? "");
+  if (type === "button") return safeText(string(record(message.button)?.text) ?? "");
   if (type === "interactive") {
     const interactive = record(message.interactive);
-    return (
+    return safeText(
       string(record(interactive?.button_reply)?.title) ??
       string(record(interactive?.list_reply)?.title) ??
       ""
@@ -28,23 +46,37 @@ function extractText(message: UnknownRecord, type: string): string {
 
 export function parseIncomingMessages(payload: unknown): IncomingWhatsAppMessage[] {
   const root = record(payload);
-  const entries = Array.isArray(root?.entry) ? root.entry : [];
+  const entries = boundedArray(root?.entry);
   const output: IncomingWhatsAppMessage[] = [];
+  const seenMessageIds = new Set<string>();
+  let inspectedEvents = 0;
 
   for (const entryValue of entries) {
     const entry = record(entryValue);
-    const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+    const changes = boundedArray(entry?.changes);
     for (const changeValue of changes) {
       const value = record(record(changeValue)?.value);
-      const messages = Array.isArray(value?.messages) ? value.messages : [];
+      const messages = boundedArray(value?.messages);
       for (const messageValue of messages) {
+        inspectedEvents += 1;
+        if (inspectedEvents > MAX_EVENTS_PER_PAYLOAD) return output;
         const message = record(messageValue);
         if (!message) continue;
         const externalMessageId = string(message.id);
         const from = string(message.from);
         const type = string(message.type) ?? "unknown";
         const timestamp = string(message.timestamp) ?? "";
-        if (!externalMessageId || !from) continue;
+        if (
+          !validMessageId(externalMessageId) ||
+          seenMessageIds.has(externalMessageId) ||
+          !from ||
+          !/^\d{7,20}$/.test(from) ||
+          !/^[a-z0-9_]{1,32}$/i.test(type) ||
+          (timestamp && !/^\d{1,16}$/.test(timestamp))
+        ) {
+          continue;
+        }
+        seenMessageIds.add(externalMessageId);
         output.push({
           externalMessageId,
           from,
@@ -52,6 +84,50 @@ export function parseIncomingMessages(payload: unknown): IncomingWhatsAppMessage
           text: extractText(message, type),
           timestamp
         });
+        if (output.length >= MAX_EVENTS_PER_PAYLOAD) return output;
+      }
+    }
+  }
+  return output;
+}
+
+export function parseMessageStatusUpdates(payload: unknown): WhatsAppMessageStatus[] {
+  const root = record(payload);
+  const output: WhatsAppMessageStatus[] = [];
+  const seen = new Set<string>();
+  let inspectedEvents = 0;
+  const allowedStatuses = new Set<WhatsAppMessageStatus["status"]>([
+    "sent",
+    "delivered",
+    "read",
+    "failed"
+  ]);
+
+  for (const entryValue of boundedArray(root?.entry)) {
+    const entry = record(entryValue);
+    for (const changeValue of boundedArray(entry?.changes)) {
+      const value = record(record(changeValue)?.value);
+      for (const statusValue of boundedArray(value?.statuses)) {
+        inspectedEvents += 1;
+        if (inspectedEvents > MAX_EVENTS_PER_PAYLOAD) return output;
+        const statusRecord = record(statusValue);
+        if (!statusRecord) continue;
+        const externalMessageId = string(statusRecord.id);
+        const status = string(statusRecord.status) as WhatsAppMessageStatus["status"] | null;
+        const timestamp = string(statusRecord.timestamp) ?? "";
+        const deduplicationKey = `${externalMessageId ?? ""}:${status ?? ""}`;
+        if (
+          !validMessageId(externalMessageId) ||
+          !status ||
+          !allowedStatuses.has(status) ||
+          (timestamp && !/^\d{1,16}$/.test(timestamp)) ||
+          seen.has(deduplicationKey)
+        ) {
+          continue;
+        }
+        seen.add(deduplicationKey);
+        output.push({ externalMessageId, status, timestamp });
+        if (output.length >= MAX_EVENTS_PER_PAYLOAD) return output;
       }
     }
   }
