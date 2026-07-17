@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import Fastify, { type FastifyRequest } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MessageProcessor } from "../src/messages/message-processor.js";
-import { registerWhatsAppRoutes } from "../src/whatsapp/routes.js";
+import { registerWhatsAppRoutes, summarizeWebhookPayload } from "../src/whatsapp/routes.js";
 
 const apps: Array<ReturnType<typeof Fastify>> = [];
 
@@ -26,7 +26,8 @@ async function appWithProcessor(
       phoneNumberId: "123456789",
       graphApiVersion: "v25.0",
       appSecret: "meta-app-secret-with-32-characters",
-      requireSignature: true
+      requireSignature: true,
+      debugLogging: false
     },
     processor: { enqueue, recordStatus } as unknown as MessageProcessor
   });
@@ -38,6 +39,42 @@ afterEach(async () => {
 });
 
 describe("WhatsApp webhook routes", () => {
+  it("summarizes webhook payloads without exposing identifiers or message content", () => {
+    const payload = {
+      object: "whatsapp_business_account",
+      entry: [{
+        changes: [{
+          value: {
+            metadata: { phone_number_id: "123456789" },
+            messages: [{
+              id: "wamid.secret",
+              from: "905551234567",
+              type: "text",
+              text: { body: "Confidential report request" }
+            }],
+            statuses: [{ id: "wamid.out", status: "delivered" }]
+          }
+        }]
+      }]
+    };
+
+    const summary = summarizeWebhookPayload(payload, "123456789");
+    expect(summary).toEqual({
+      object: "whatsapp_business_account",
+      entryCount: 1,
+      changeCount: 1,
+      messageCount: 1,
+      statusCount: 1,
+      messageTypes: ["text"],
+      statusValues: ["delivered"],
+      matchingPhoneNumberIds: 1,
+      mismatchedPhoneNumberIds: 0
+    });
+    expect(JSON.stringify(summary)).not.toContain("905551234567");
+    expect(JSON.stringify(summary)).not.toContain("Confidential report request");
+    expect(JSON.stringify(summary)).not.toContain("wamid.secret");
+  });
+
   it("uses a constant-time token check and validates the challenge shape", async () => {
     const app = await appWithProcessor(async () => "queued");
     const accepted = await app.inject({
