@@ -1,5 +1,7 @@
 import type { FastifyInstance } from "fastify";
+import type { Logger } from "pino";
 import type { AppConfig } from "../config/env.js";
+import { logSafe } from "../logging/logger.js";
 import type { MessageProcessor } from "../messages/message-processor.js";
 import { parseIncomingMessages, parseMessageStatusUpdates } from "./webhook-parser.js";
 import { timingSafeStringEqual, verifyMetaSignature } from "./signature.js";
@@ -7,6 +9,7 @@ import { timingSafeStringEqual, verifyMetaSignature } from "./signature.js";
 type RouteDependencies = {
   config: AppConfig["whatsapp"];
   processor: MessageProcessor;
+  logger: Logger;
   isDecommissioned?: () => Promise<boolean>;
 };
 
@@ -113,7 +116,9 @@ export async function registerWhatsAppRoutes(app: FastifyInstance, dependencies:
     const incomingMessages = parseIncomingMessages(request.body, expectedPhoneNumberId);
     const statusUpdates = parseMessageStatusUpdates(request.body, expectedPhoneNumberId);
     if (dependencies.config.debugLogging) {
-      request.log.info(
+      logSafe(
+        dependencies.logger,
+        "info",
         { whatsappWebhook: summarizeWebhookPayload(request.body, expectedPhoneNumberId) },
         "Received sanitized WhatsApp webhook"
       );
