@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import Fastify, { type FastifyRequest } from "fastify";
+import type { Logger } from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MessageProcessor } from "../src/messages/message-processor.js";
 import { registerWhatsAppRoutes, summarizeWebhookPayload } from "../src/whatsapp/routes.js";
@@ -29,7 +30,8 @@ async function appWithProcessor(
       requireSignature: true,
       debugLogging: false
     },
-    processor: { enqueue, recordStatus } as unknown as MessageProcessor
+    processor: { enqueue, recordStatus } as unknown as MessageProcessor,
+    logger: { info: vi.fn() } as unknown as Logger
   });
   return app;
 }
