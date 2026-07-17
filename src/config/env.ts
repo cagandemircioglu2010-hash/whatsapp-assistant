@@ -91,8 +91,11 @@ const schema = z
       .default("true")
       .transform((value) => value === "true"),
     LLM_ENABLED: booleanFromString,
+    LLM_PROVIDER: z.enum(["openai", "gemini"]).default("openai"),
     OPENAI_API_KEY: z.string().optional(),
     OPENAI_MODEL: z.string().min(1).default("gpt-5.6-terra"),
+    GEMINI_API_KEY: z.string().optional(),
+    GEMINI_MODEL: z.string().min(1).default("gemini-2.5-flash-lite"),
     OPENAI_REASONING_EFFORT: z
       .enum(["none", "low", "medium", "high", "xhigh", "max"])
       .default("low"),
@@ -378,18 +381,20 @@ const schema = z
       }
     }
 
-    if (env.LLM_ENABLED && !env.OPENAI_API_KEY) {
+    const selectedLlmApiKey = env.LLM_PROVIDER === "gemini" ? env.GEMINI_API_KEY : env.OPENAI_API_KEY;
+    const selectedLlmApiKeyName = env.LLM_PROVIDER === "gemini" ? "GEMINI_API_KEY" : "OPENAI_API_KEY";
+    if (env.LLM_ENABLED && !selectedLlmApiKey) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["OPENAI_API_KEY"],
-        message: "OPENAI_API_KEY is required when LLM_ENABLED=true"
+        path: [selectedLlmApiKeyName],
+        message: `${selectedLlmApiKeyName} is required when LLM_ENABLED=true`
       });
     }
-    if (env.LLM_ENABLED && env.NODE_ENV === "production" && (env.OPENAI_API_KEY?.length ?? 0) < 20) {
+    if (env.LLM_ENABLED && env.NODE_ENV === "production" && (selectedLlmApiKey?.length ?? 0) < 20) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["OPENAI_API_KEY"],
-        message: "OPENAI_API_KEY is unexpectedly short"
+        path: [selectedLlmApiKeyName],
+        message: `${selectedLlmApiKeyName} is unexpectedly short`
       });
     }
     if (env.LLM_ENABLED && !env.SAFETY_IDENTIFIER_SECRET) {
@@ -448,6 +453,7 @@ export type AppConfig = {
   };
   llm: {
     enabled: boolean;
+    provider: "openai" | "gemini";
     apiKey?: string;
     model: string;
     reasoningEffort: "none" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -512,8 +518,15 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     },
     llm: {
       enabled: env.LLM_ENABLED,
-      ...(env.OPENAI_API_KEY ? { apiKey: env.OPENAI_API_KEY } : {}),
-      model: env.OPENAI_MODEL,
+      provider: env.LLM_PROVIDER,
+      ...(env.LLM_PROVIDER === "gemini"
+        ? env.GEMINI_API_KEY
+          ? { apiKey: env.GEMINI_API_KEY }
+          : {}
+        : env.OPENAI_API_KEY
+          ? { apiKey: env.OPENAI_API_KEY }
+          : {}),
+      model: env.LLM_PROVIDER === "gemini" ? env.GEMINI_MODEL : env.OPENAI_MODEL,
       reasoningEffort: env.OPENAI_REASONING_EFFORT,
       maxToolCalls: env.LLM_MAX_TOOL_CALLS,
       maxOutputTokens: env.LLM_MAX_OUTPUT_TOKENS,

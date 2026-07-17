@@ -12,6 +12,7 @@ import { MessageProcessor } from "./messages/message-processor.js";
 import { MessageRepository } from "./messages/message.repository.js";
 import { CompanyLlmAssistant } from "./llm/company-assistant.js";
 import { OpenAIResponsesGateway } from "./llm/openai-responses.gateway.js";
+import { GeminiChatCompletionsGateway } from "./llm/gemini-chat-completions.gateway.js";
 import { CompanyMcpSessionFactory } from "./mcp/session.js";
 import { CompanyReportRepository } from "./reports/company-report.repository.js";
 import { ReportCommandRouter } from "./reports/report-command-router.js";
@@ -107,13 +108,20 @@ export async function buildApp(dependencies: AppDependencies) {
   let responder: AssistantResponder = router;
 
   if (dependencies.config.llm.enabled) {
-    const gateway = new OpenAIResponsesGateway({
-      apiKey: dependencies.config.llm.apiKey!,
-      model: dependencies.config.llm.model,
-      reasoningEffort: dependencies.config.llm.reasoningEffort,
-      maxOutputTokens: dependencies.config.llm.maxOutputTokens,
-      timeoutMs: dependencies.config.llm.timeoutMs
-    });
+    const gateway = dependencies.config.llm.provider === "gemini"
+      ? new GeminiChatCompletionsGateway({
+          apiKey: dependencies.config.llm.apiKey!,
+          model: dependencies.config.llm.model,
+          maxOutputTokens: dependencies.config.llm.maxOutputTokens,
+          timeoutMs: dependencies.config.llm.timeoutMs
+        })
+      : new OpenAIResponsesGateway({
+          apiKey: dependencies.config.llm.apiKey!,
+          model: dependencies.config.llm.model,
+          reasoningEffort: dependencies.config.llm.reasoningEffort,
+          maxOutputTokens: dependencies.config.llm.maxOutputTokens,
+          timeoutMs: dependencies.config.llm.timeoutMs
+        });
     const mcpSessions = new CompanyMcpSessionFactory({ reports, authorization, audit });
     const llmAssistant = new CompanyLlmAssistant({
       gateway,

@@ -189,6 +189,20 @@ npm run db:add-user -- \
 npm run db:set-user-active -- --phone "+905551234567" --active false
 ```
 
+## LLM sağlayıcısı
+
+Ücretsiz-katman testleri için Gemini kullanılabilir:
+
+```env
+LLM_ENABLED=true
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=<google-ai-studio-api-key>
+GEMINI_MODEL=gemini-2.5-flash-lite
+```
+
+Gemini ücretsiz katmanındaki istek ve yanıtlar Google ürünlerini iyileştirmek için kullanılabilir. OpenAI kullanmak
+için `LLM_PROVIDER=openai`, `OPENAI_API_KEY` ve `OPENAI_MODEL` ayarlanır.
+
 Kullanıcı bazlı KVKK/GDPR erasure iki aşamalıdır. İlk komut yalnızca dry-run ve confirmation reference üretir:
 
 ```bash

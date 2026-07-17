@@ -35,6 +35,7 @@ function config(): AppConfig {
     whatsapp: { enabled: false, graphApiVersion: "v25.0", requireSignature: true },
     llm: {
       enabled: false,
+      provider: "openai",
       model: "test-model",
       reasoningEffort: "low",
       maxToolCalls: 4,

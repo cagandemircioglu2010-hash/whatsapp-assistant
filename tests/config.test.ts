@@ -10,7 +10,7 @@ const baseEnvironment = {
 };
 
 describe("application configuration", () => {
-  it("requires an OpenAI key only when the LLM is enabled", () => {
+  it("requires the selected provider key only when the LLM is enabled", () => {
     expect(() => loadConfig({ ...baseEnvironment, LLM_ENABLED: "true" })).toThrow("OPENAI_API_KEY");
     expect(
       loadConfig({
@@ -24,6 +24,28 @@ describe("application configuration", () => {
       loadConfig({ ...baseEnvironment, LLM_ENABLED: "true", OPENAI_API_KEY: "test-key" })
     ).toThrow("SAFETY_IDENTIFIER_SECRET");
     expect(loadConfig(baseEnvironment).llm.enabled).toBe(false);
+    expect(() =>
+      loadConfig({
+        ...baseEnvironment,
+        LLM_ENABLED: "true",
+        LLM_PROVIDER: "gemini",
+        SAFETY_IDENTIFIER_SECRET: "s".repeat(32)
+      })
+    ).toThrow("GEMINI_API_KEY");
+    expect(
+      loadConfig({
+        ...baseEnvironment,
+        LLM_ENABLED: "true",
+        LLM_PROVIDER: "gemini",
+        GEMINI_API_KEY: "gemini-test-key",
+        SAFETY_IDENTIFIER_SECRET: "s".repeat(32)
+      }).llm
+    ).toMatchObject({
+      enabled: true,
+      provider: "gemini",
+      apiKey: "gemini-test-key",
+      model: "gemini-2.5-flash-lite"
+    });
   });
 
   it("requires authenticated encryption and strong secrets in production", () => {
