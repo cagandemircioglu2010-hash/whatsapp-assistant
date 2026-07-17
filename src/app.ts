@@ -157,6 +157,7 @@ export async function buildApp(dependencies: AppDependencies) {
     await registerWhatsAppRoutes(app, {
       config: dependencies.config.whatsapp,
       processor,
+      logger: dependencies.logger,
       isDecommissioned: async () => {
         const state = await dependencies.appPool.query<{ decommissioned: boolean }>(
           `SELECT COALESCE(
