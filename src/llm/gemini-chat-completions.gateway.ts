@@ -1,21 +1,49 @@
-import OpenAI from "openai";
-import type {
-  ChatCompletionAssistantMessageParam,
-  ChatCompletionMessageParam,
-  ChatCompletionTool
-} from "openai/resources/chat/completions/completions.js";
+import { randomUUID } from "node:crypto";
 import type { LlmFunctionTool, LlmGateway, LlmTurn, LlmTurnRequest } from "./types.js";
 
-type GeminiChatCompletionsGatewayOptions = {
+type GeminiGenerateContentGatewayOptions = {
   apiKey: string;
   model: string;
   maxOutputTokens: number;
   timeoutMs: number;
 };
 
+type GeminiFunctionCall = {
+  id?: string;
+  name: string;
+  args: Record<string, unknown>;
+};
+
+type GeminiPart = {
+  text?: string;
+  thought?: boolean;
+  thoughtSignature?: string;
+  functionCall?: GeminiFunctionCall;
+  functionResponse?: {
+    id: string;
+    name: string;
+    response: Record<string, unknown>;
+  };
+};
+
+type GeminiContent = {
+  role: "user" | "model";
+  parts: GeminiPart[];
+};
+
 type GeminiReplayItem = {
-  type: "gemini_chat_message";
-  message: ChatCompletionAssistantMessageParam;
+  type: "gemini_native_content";
+  content: GeminiContent;
+};
+
+type GeminiGenerateContentResponse = {
+  candidates?: Array<{
+    content?: GeminiContent;
+    finishReason?: string;
+  }>;
+  promptFeedback?: {
+    blockReason?: string;
+  };
 };
 
 type ResponsesUserItem = {
@@ -41,7 +69,13 @@ function isResponsesUserItem(value: unknown): value is ResponsesUserItem {
 }
 
 function isGeminiReplayItem(value: unknown): value is GeminiReplayItem {
-  return isRecord(value) && value.type === "gemini_chat_message" && isRecord(value.message);
+  return (
+    isRecord(value) &&
+    value.type === "gemini_native_content" &&
+    isRecord(value.content) &&
+    (value.content.role === "user" || value.content.role === "model") &&
+    Array.isArray(value.content.parts)
+  );
 }
 
 function isFunctionCallOutputItem(value: unknown): value is FunctionCallOutputItem {
@@ -53,92 +87,163 @@ function isFunctionCallOutputItem(value: unknown): value is FunctionCallOutputIt
   );
 }
 
-export function toGeminiChatMessages(request: LlmTurnRequest): ChatCompletionMessageParam[] {
-  const messages: ChatCompletionMessageParam[] = [
-    { role: "system", content: request.instructions }
-  ];
+function functionResponsePayload(output: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(output);
+    return { result: parsed };
+  } catch {
+    return { result: output };
+  }
+}
+
+function normalizeGeminiSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeGeminiSchema);
+  if (!isRecord(value)) return value;
+
+  if (
+    Array.isArray(value.anyOf) &&
+    value.anyOf.length === 2 &&
+    value.anyOf.some((candidate) => isRecord(candidate) && candidate.type === "null")
+  ) {
+    const nonNull = value.anyOf.find((candidate) => !(isRecord(candidate) && candidate.type === "null"));
+    if (isRecord(nonNull)) {
+      const normalized = normalizeGeminiSchema(nonNull);
+      return isRecord(normalized)
+        ? { ...normalized, ...(typeof value.description === "string" ? { description: value.description } : {}), nullable: true }
+        : normalized;
+    }
+  }
+
+  const normalized: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (["$schema", "additionalProperties", "pattern", "minLength", "maxLength"].includes(key)) continue;
+    normalized[key] = normalizeGeminiSchema(child);
+  }
+  return normalized;
+}
+
+export function toGeminiNativeContents(request: LlmTurnRequest): GeminiContent[] {
+  const callNames = new Map<string, string>();
+  for (const item of request.inputItems) {
+    if (!isGeminiReplayItem(item)) continue;
+    for (const part of item.content.parts) {
+      const call = part.functionCall;
+      if (call?.id) callNames.set(call.id, call.name);
+    }
+  }
+
+  const contents: GeminiContent[] = [];
+  let pendingFunctionResponses: GeminiPart[] = [];
+  const flushFunctionResponses = () => {
+    if (pendingFunctionResponses.length === 0) return;
+    contents.push({ role: "user", parts: pendingFunctionResponses });
+    pendingFunctionResponses = [];
+  };
 
   for (const item of request.inputItems) {
     if (isResponsesUserItem(item)) {
-      messages.push({
+      flushFunctionResponses();
+      contents.push({
         role: "user",
-        content: item.content.map((part) => part.text).join("\n")
+        parts: [{ text: item.content.map((part) => part.text).join("\n") }]
       });
       continue;
     }
     if (isGeminiReplayItem(item)) {
-      messages.push(item.message);
+      flushFunctionResponses();
+      contents.push(item.content);
       continue;
     }
     if (isFunctionCallOutputItem(item)) {
-      messages.push({ role: "tool", tool_call_id: item.call_id, content: item.output });
+      const name = callNames.get(item.call_id);
+      if (!name) throw new Error("Gemini function response is missing its function name");
+      pendingFunctionResponses.push({
+        functionResponse: {
+          id: item.call_id,
+          name,
+          response: functionResponsePayload(item.output)
+        }
+      });
     }
   }
-
-  return messages;
+  flushFunctionResponses();
+  return contents;
 }
 
-export function toGeminiChatTools(tools: LlmFunctionTool[]): ChatCompletionTool[] {
-  return tools.map((tool) => ({
-    type: "function",
-    function: {
-      name: tool.name,
-      ...(tool.description ? { description: tool.description } : {}),
-      parameters: tool.parameters
+export function toGeminiNativeTools(tools: LlmFunctionTool[]) {
+  return [
+    {
+      functionDeclarations: tools.map((tool) => ({
+        name: tool.name,
+        ...(tool.description ? { description: tool.description } : {}),
+        parameters: normalizeGeminiSchema(tool.parameters) as Record<string, unknown>
+      }))
     }
-  }));
+  ];
+}
+
+function normalizeCandidateContent(content: GeminiContent): GeminiContent {
+  return {
+    role: "model",
+    parts: content.parts.map((part) => {
+      if (!part.functionCall || part.functionCall.id) return part;
+      return {
+        ...part,
+        functionCall: { ...part.functionCall, id: `gemini-${randomUUID()}` }
+      };
+    })
+  };
 }
 
 export class GeminiChatCompletionsGateway implements LlmGateway {
-  private readonly client: OpenAI;
-
-  constructor(private readonly options: GeminiChatCompletionsGatewayOptions) {
-    this.client = new OpenAI({
-      apiKey: options.apiKey,
-      baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
-      maxRetries: 2,
-      timeout: options.timeoutMs
-    });
-  }
+  constructor(private readonly options: GeminiGenerateContentGatewayOptions) {}
 
   async createTurn(request: LlmTurnRequest): Promise<LlmTurn> {
-    const completion = await this.client.chat.completions.create(
-      {
-        model: this.options.model,
-        messages: toGeminiChatMessages(request),
-        tools: toGeminiChatTools(request.tools),
-        tool_choice: "auto",
-        max_tokens: this.options.maxOutputTokens
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(this.options.model)}:generateContent`;
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": this.options.apiKey
       },
-      { signal: AbortSignal.timeout(this.options.timeoutMs) }
-    );
-    const message = completion.choices[0]?.message;
-    if (!message) throw new Error("Gemini returned no completion choice");
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: request.instructions }] },
+        contents: toGeminiNativeContents(request),
+        tools: toGeminiNativeTools(request.tools),
+        toolConfig: { functionCallingConfig: { mode: "AUTO" } },
+        generationConfig: { maxOutputTokens: this.options.maxOutputTokens }
+      }),
+      signal: AbortSignal.timeout(this.options.timeoutMs)
+    });
 
-    const functionCalls = (message.tool_calls ?? [])
-      .filter((call) => call.type === "function")
-      .map((call) => ({
-        callId: call.id,
-        name: call.function.name,
-        arguments: call.function.arguments
-      }));
-    const replayMessage: ChatCompletionAssistantMessageParam = {
-      role: "assistant",
-      content: message.content,
-      ...(functionCalls.length > 0
-        ? {
-            tool_calls: functionCalls.map((call) => ({
-              id: call.callId,
-              type: "function" as const,
-              function: { name: call.name, arguments: call.arguments }
-            }))
-          }
-        : {})
-    };
+    if (!response.ok) {
+      const details = (await response.text()).replace(/\s+/g, " ").slice(0, 1_000);
+      throw new Error(`Gemini API request failed with status ${response.status}${details ? `: ${details}` : ""}`);
+    }
+
+    const payload = (await response.json()) as GeminiGenerateContentResponse;
+    const candidate = payload.candidates?.[0];
+    if (!candidate?.content) {
+      const reason = payload.promptFeedback?.blockReason ?? candidate?.finishReason ?? "unknown";
+      throw new Error(`Gemini returned no completion candidate (${reason})`);
+    }
+
+    const content = normalizeCandidateContent(candidate.content);
+    const functionCalls = content.parts.flatMap((part) => {
+      const call = part.functionCall;
+      return call
+        ? [{ callId: call.id!, name: call.name, arguments: JSON.stringify(call.args ?? {}) }]
+        : [];
+    });
+    const outputText = content.parts
+      .filter((part) => part.thought !== true)
+      .map((part) => part.text ?? "")
+      .join("")
+      .trim();
 
     return {
-      outputText: message.content ?? "",
-      replayItems: [{ type: "gemini_chat_message", message: replayMessage } satisfies GeminiReplayItem],
+      outputText,
+      replayItems: [{ type: "gemini_native_content", content } satisfies GeminiReplayItem],
       functionCalls
     };
   }
