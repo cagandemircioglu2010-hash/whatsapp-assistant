@@ -10,6 +10,66 @@ type RouteDependencies = {
   isDecommissioned?: () => Promise<boolean>;
 };
 
+type UnknownRecord = Record<string, unknown>;
+
+function record(value: unknown): UnknownRecord | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as UnknownRecord)
+    : null;
+}
+
+export function summarizeWebhookPayload(payload: unknown, expectedPhoneNumberId?: string) {
+  const root = record(payload);
+  const entries = Array.isArray(root?.entry) ? root.entry : [];
+  const messageTypes = new Set<string>();
+  const statusValues = new Set<string>();
+  let changeCount = 0;
+  let messageCount = 0;
+  let statusCount = 0;
+  let matchingPhoneNumberIds = 0;
+  let mismatchedPhoneNumberIds = 0;
+
+  for (const entry of entries) {
+    const changes = Array.isArray(record(entry)?.changes) ? record(entry)!.changes as unknown[] : [];
+    changeCount += changes.length;
+    for (const change of changes) {
+      const value = record(record(change)?.value);
+      const metadata = record(value?.metadata);
+      const phoneNumberId = metadata?.phone_number_id;
+      if (typeof phoneNumberId === "string" && expectedPhoneNumberId) {
+        if (phoneNumberId === expectedPhoneNumberId) matchingPhoneNumberIds += 1;
+        else mismatchedPhoneNumberIds += 1;
+      }
+
+      const messages = Array.isArray(value?.messages) ? value.messages : [];
+      messageCount += messages.length;
+      for (const message of messages) {
+        const type = record(message)?.type;
+        if (typeof type === "string") messageTypes.add(type);
+      }
+
+      const statuses = Array.isArray(value?.statuses) ? value.statuses : [];
+      statusCount += statuses.length;
+      for (const status of statuses) {
+        const statusValue = record(status)?.status;
+        if (typeof statusValue === "string") statusValues.add(statusValue);
+      }
+    }
+  }
+
+  return {
+    object: typeof root?.object === "string" ? root.object : "unknown",
+    entryCount: entries.length,
+    changeCount,
+    messageCount,
+    statusCount,
+    messageTypes: [...messageTypes].sort(),
+    statusValues: [...statusValues].sort(),
+    matchingPhoneNumberIds,
+    mismatchedPhoneNumberIds
+  };
+}
+
 export async function registerWhatsAppRoutes(app: FastifyInstance, dependencies: RouteDependencies): Promise<void> {
   app.get<{ Querystring: { "hub.mode"?: string; "hub.verify_token"?: string; "hub.challenge"?: string } }>(
     "/webhooks/whatsapp",
@@ -52,6 +112,12 @@ export async function registerWhatsAppRoutes(app: FastifyInstance, dependencies:
     const expectedPhoneNumberId = dependencies.config.phoneNumberId;
     const incomingMessages = parseIncomingMessages(request.body, expectedPhoneNumberId);
     const statusUpdates = parseMessageStatusUpdates(request.body, expectedPhoneNumberId);
+    if (dependencies.config.debugLogging) {
+      request.log.info(
+        { whatsappWebhook: summarizeWebhookPayload(request.body, expectedPhoneNumberId) },
+        "Received sanitized WhatsApp webhook"
+      );
+    }
     let queued = 0;
     for (let index = 0; index < incomingMessages.length; index += 4) {
       const batch = incomingMessages.slice(index, index + 4);
