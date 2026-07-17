@@ -197,7 +197,7 @@ npm run db:set-user-active -- --phone "+905551234567" --active false
 LLM_ENABLED=true
 LLM_PROVIDER=gemini
 GEMINI_API_KEY=<google-ai-studio-api-key>
-GEMINI_MODEL=gemini-2.5-flash-lite
+GEMINI_MODEL=gemini-3.5-flash
 ```
 
 Gemini ücretsiz katmanındaki istek ve yanıtlar Google ürünlerini iyileştirmek için kullanılabilir. OpenAI kullanmak

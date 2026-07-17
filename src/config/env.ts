@@ -95,7 +95,7 @@ const schema = z
     OPENAI_API_KEY: z.string().optional(),
     OPENAI_MODEL: z.string().min(1).default("gpt-5.6-terra"),
     GEMINI_API_KEY: z.string().optional(),
-    GEMINI_MODEL: z.string().min(1).default("gemini-2.5-flash-lite"),
+    GEMINI_MODEL: z.string().min(1).default("gemini-3.5-flash"),
     OPENAI_REASONING_EFFORT: z
       .enum(["none", "low", "medium", "high", "xhigh", "max"])
       .default("low"),

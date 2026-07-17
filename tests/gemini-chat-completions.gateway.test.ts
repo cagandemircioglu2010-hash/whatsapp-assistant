@@ -112,7 +112,7 @@ describe("Gemini native generateContent gateway", () => {
     );
     const gateway = new GeminiChatCompletionsGateway({
       apiKey: "AQ.secret",
-      model: "gemini-2.5-flash-lite",
+      model: "gemini-3.5-flash",
       maxOutputTokens: 500,
       timeoutMs: 5_000
     });
