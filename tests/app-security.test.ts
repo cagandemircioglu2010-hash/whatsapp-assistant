@@ -32,7 +32,7 @@ function config(): AppConfig {
     ingressGlobalRateLimitPerMinute: 600,
     dataLifecycleIntervalMinutes: 60,
     messageWorkerConcurrency: 4,
-    whatsapp: { enabled: false, graphApiVersion: "v25.0", requireSignature: true },
+    whatsapp: { enabled: false, graphApiVersion: "v25.0", requireSignature: true, debugLogging: false },
     llm: {
       enabled: false,
       provider: "openai",
