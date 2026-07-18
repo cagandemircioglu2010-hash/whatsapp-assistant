@@ -6,6 +6,8 @@ type WhatsAppClientConfig = {
   accessToken: string;
   phoneNumberId: string;
   graphApiVersion: string;
+  // Overridable only for local testing against a mock Graph API.
+  baseUrl?: string;
   fetchFn?: typeof fetch;
   sleep?: (milliseconds: number) => Promise<void>;
   maxRetries?: number;
@@ -211,7 +213,7 @@ export class WhatsAppClient implements WhatsAppSender {
     let response: Response;
     try {
       response = await fetchFn(
-        `https://graph.facebook.com/${this.config.graphApiVersion}/${this.config.phoneNumberId}?fields=verified_name,quality_rating`,
+        `${this.baseUrl()}/${this.config.graphApiVersion}/${this.config.phoneNumberId}?fields=verified_name,quality_rating`,
         {
           method: "GET",
           headers: { Authorization: `Bearer ${this.config.accessToken}` },
@@ -237,8 +239,12 @@ export class WhatsAppClient implements WhatsAppSender {
     return { verifiedName, qualityRating };
   }
 
+  private baseUrl(): string {
+    return this.config.baseUrl ?? "https://graph.facebook.com";
+  }
+
   private messagesUrl(): string {
-    return `https://graph.facebook.com/${this.config.graphApiVersion}/${this.config.phoneNumberId}/messages`;
+    return `${this.baseUrl()}/${this.config.graphApiVersion}/${this.config.phoneNumberId}/messages`;
   }
 
   private headers(): Record<string, string> {
