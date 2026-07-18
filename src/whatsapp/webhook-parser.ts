@@ -1,4 +1,4 @@
-import type { IncomingWhatsAppMessage, WhatsAppMessageStatus } from "./types.js";
+import type { IncomingWhatsAppMessage, WhatsAppMessageStatus, WhatsAppStatusError } from "./types.js";
 
 type UnknownRecord = Record<string, unknown>;
 const MAX_ITEMS_PER_LEVEL = 100;
@@ -24,6 +24,20 @@ function safeText(value: string): string {
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
     .replace(/[\u202A-\u202E\u2066-\u2069]/g, "")
     .slice(0, MAX_TEXT_LENGTH);
+}
+
+// Meta reports the reason a delivery failed inside statuses[].errors. Only the
+// numeric code and a short sanitized title are kept, never nested payloads.
+function extractStatusErrors(statusRecord: UnknownRecord): WhatsAppStatusError[] {
+  const output: WhatsAppStatusError[] = [];
+  for (const errorValue of boundedArray(statusRecord.errors).slice(0, 3)) {
+    const errorRecord = record(errorValue);
+    const code = errorRecord?.code;
+    if (typeof code !== "number" || !Number.isInteger(code) || code < 0 || code > 99_999_999) continue;
+    const title = string(errorRecord?.title);
+    output.push({ code, title: title ? safeText(title).slice(0, 200) : null });
+  }
+  return output;
 }
 
 function validMessageId(value: string | null): value is string {
@@ -146,7 +160,13 @@ export function parseMessageStatusUpdates(
           continue;
         }
         seen.add(deduplicationKey);
-        output.push({ externalMessageId, status, timestamp });
+        const errors = status === "failed" ? extractStatusErrors(statusRecord) : [];
+        output.push({
+          externalMessageId,
+          status,
+          timestamp,
+          ...(errors.length > 0 ? { errors } : {})
+        });
         if (output.length >= MAX_EVENTS_PER_PAYLOAD) return output;
       }
     }

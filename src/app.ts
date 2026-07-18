@@ -133,6 +133,7 @@ export async function buildApp(dependencies: AppDependencies) {
     responder = new FallbackAssistantResponder(llmAssistant, router, dependencies.logger);
   }
 
+  let whatsappProcessor: MessageProcessor | null = null;
   if (dependencies.config.whatsapp.enabled) {
     const sender = new WhatsAppClient({
       accessToken: dependencies.config.whatsapp.accessToken!,
@@ -154,6 +155,33 @@ export async function buildApp(dependencies: AppDependencies) {
       ingressGlobalRateLimitPerMinute: dependencies.config.ingressGlobalRateLimitPerMinute,
       workerConcurrency: dependencies.config.messageWorkerConcurrency
     });
+    whatsappProcessor = processor;
+
+    // Boot-time configuration check: a rejected token/phone-number pair is
+    // reported loudly (with the Meta error code and remediation hint) instead
+    // of surfacing later as redacted send failures. Non-fatal by design so a
+    // Meta outage cannot block startup.
+    if (dependencies.config.nodeEnv !== "test") {
+      setImmediate(async () => {
+        try {
+          const info = await sender.verifyConfiguration();
+          logSafe(
+            dependencies.logger,
+            "info",
+            { verifiedName: info.verifiedName, qualityRating: info.qualityRating },
+            "WhatsApp configuration verified against the Graph API"
+          );
+        } catch (error) {
+          logSafe(
+            dependencies.logger,
+            "error",
+            { error },
+            "WhatsApp configuration check failed; outbound sends will likely fail"
+          );
+        }
+      });
+    }
+
     await registerWhatsAppRoutes(app, {
       config: dependencies.config.whatsapp,
       processor,
@@ -226,6 +254,9 @@ export async function buildApp(dependencies: AppDependencies) {
         health.lifecycleHealthy &&
         health.companyViewsReady &&
         health.pendingMessages < 5_000;
+      // Reported but never gates `healthy`: restarting the service cannot fix
+      // a broken Meta configuration, so this must not trip restart loops.
+      const delivery = whatsappProcessor?.deliveryHealth() ?? null;
       return reply.code(healthy ? 200 : 503).send({
         status: healthy ? "ok" : "unhealthy",
         checks: {
@@ -233,7 +264,15 @@ export async function buildApp(dependencies: AppDependencies) {
           service: health.serviceActive,
           lifecycle: health.lifecycleHealthy,
           reporting: health.companyViewsReady,
-          queue: health.pendingMessages < 5_000
+          queue: health.pendingMessages < 5_000,
+          ...(delivery
+            ? {
+                whatsappDelivery: delivery.consecutivePermanentSendFailures < 5,
+                ...(delivery.lastMetaErrorCode !== null && delivery.consecutivePermanentSendFailures > 0
+                  ? { lastMetaErrorCode: delivery.lastMetaErrorCode }
+                  : {})
+              }
+            : {})
         }
       });
     } catch {

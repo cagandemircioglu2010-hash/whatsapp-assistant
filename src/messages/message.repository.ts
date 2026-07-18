@@ -61,6 +61,7 @@ export interface MessageStore {
 
 export interface PendingMessageStore {
   claimNextInbound(): Promise<PendingInboundMessage | null>;
+  markInboundUndeliverable?(messageId: string): Promise<void>;
 }
 
 export interface OutboundDeliveryStore {
@@ -196,6 +197,17 @@ export class MessageRepository implements MessageStore {
 
   async setInboundStatus(messageId: string, status: "processed" | "ignored" | "failed"): Promise<void> {
     await this.pool.query("UPDATE messages SET status = $2, updated_at = NOW() WHERE id = $1", [messageId, status]);
+  }
+
+  // Terminal failure: exhausting processing_attempts keeps claimNextInbound
+  // and claimInbound from ever retrying a send that Meta rejects permanently.
+  async markInboundUndeliverable(messageId: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE messages
+       SET status = 'failed', processing_attempts = GREATEST(processing_attempts, 3), updated_at = NOW()
+       WHERE id = $1`,
+      [messageId]
+    );
   }
 
   async saveOutbound(input: SaveOutboundInput): Promise<string> {
