@@ -156,7 +156,22 @@ webhooks, and asserts replies, permanent-failure handling (131030), retry
 behavior, and read receipts. Use `npm run mock:meta` to run the fake Graph API
 standalone and point a locally running service at it.
 
-## 8. Stress / health testing
+## 8. Day-2 operations
+
+- `npm run ops:status` — one-shot overview from the database: schema state,
+  whitelist size, queue depth (pending / stuck / delivery-unknown /
+  undeliverable), 24h traffic, and failure counts. Exit code 1 when something
+  needs attention, so it can drive a cron alert.
+- `ASSISTANT_LOCALE` (tr default / en) controls the language of the notices
+  the bot sends on its own: unsupported-message-type replies, "slow down"
+  rate-limit feedback, and the best-effort "can't answer right now" apology
+  sent when processing fails before the reply (never when the send layer
+  itself is broken).
+- CI runs the mock-Meta end-to-end bridge test on every push/PR, so a
+  regression in the webhook → assistant → send path fails the build before it
+  reaches Render.
+
+## 9. Stress / health testing
 
 - `npm run test:stress` — worker queue saturation, rate-limit behavior.
 - `npm run check` — typecheck + full test suite with coverage + build.

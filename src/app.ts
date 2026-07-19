@@ -153,7 +153,8 @@ export async function buildApp(dependencies: AppDependencies) {
       rateLimitPerMinute: dependencies.config.userRateLimitPerMinute,
       ingressSenderRateLimitPerMinute: dependencies.config.ingressSenderRateLimitPerMinute,
       ingressGlobalRateLimitPerMinute: dependencies.config.ingressGlobalRateLimitPerMinute,
-      workerConcurrency: dependencies.config.messageWorkerConcurrency
+      workerConcurrency: dependencies.config.messageWorkerConcurrency,
+      locale: dependencies.config.assistantLocale
     });
     whatsappProcessor = processor;
 

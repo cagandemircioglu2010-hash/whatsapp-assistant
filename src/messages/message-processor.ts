@@ -1,5 +1,6 @@
 import type { CountryCode } from "libphonenumber-js";
 import type { Logger } from "pino";
+import { systemMessage, type AssistantLocale } from "../assistant/system-messages.js";
 import type { AssistantResponder } from "../assistant/types.js";
 import type {
   AuthorizedUserIdentity,
@@ -57,6 +58,7 @@ type MessageProcessorOptions = {
   ingressSenderRateLimitPerMinute?: number;
   ingressGlobalRateLimitPerMinute?: number;
   workerConcurrency?: number;
+  locale?: AssistantLocale;
 };
 
 type QueuedMessage = {
@@ -73,9 +75,6 @@ type QueuedMessage = {
 // else (media, contacts, locations, ...) gets a fixed notice instead of an
 // LLM round-trip over a "[image]" placeholder.
 const SUPPORTED_TEXT_TYPES = new Set(["text", "button", "interactive"]);
-
-const UNSUPPORTED_TYPE_REPLY =
-  "I can only read text messages for now. Please send your request as text.";
 
 type QueuedWork = {
   message: QueuedMessage;
@@ -102,12 +101,14 @@ export class MessageProcessor {
   private pumpScheduled = false;
   private consecutivePermanentSendFailures = 0;
   private lastMetaErrorCode: number | null = null;
+  private readonly locale: AssistantLocale;
 
   constructor(private readonly options: MessageProcessorOptions) {
     this.userRateLimit = options.rateLimitPerMinute ?? 20;
     this.ingressSenderRateLimit = options.ingressSenderRateLimitPerMinute ?? 10;
     this.ingressGlobalRateLimit = options.ingressGlobalRateLimitPerMinute ?? 600;
     this.workerConcurrency = options.workerConcurrency ?? 4;
+    this.locale = options.locale ?? "en";
     if (!Number.isInteger(this.workerConcurrency) || this.workerConcurrency < 1 || this.workerConcurrency > 16) {
       throw new Error("Worker concurrency must be between 1 and 16");
     }
@@ -372,6 +373,7 @@ export class MessageProcessor {
         { userId: queued.user.id, messageId: queued.storedId },
         "WhatsApp sender exceeded the per-user rate limit"
       );
+      void this.sendNoticeOncePerMinute(queued, "rateLimited", userRateSubject);
       return "rate_limited";
     }
 
@@ -381,7 +383,7 @@ export class MessageProcessor {
       const command =
         queued.messageType !== null && !SUPPORTED_TEXT_TYPES.has(queued.messageType)
           ? {
-              text: UNSUPPORTED_TYPE_REPLY,
+              text: systemMessage("unsupportedType", this.locale),
               resource: null,
               resources: [],
               outcome: "unsupported" as const
@@ -426,7 +428,42 @@ export class MessageProcessor {
       return "processed";
     } catch (error) {
       await this.markUnexpectedFailure(queued.storedId, queued.user.id, error);
+      // If the failure happened before/without a send attempt (LLM crash, DB
+      // error, ...) the user would otherwise face pure silence. A send-layer
+      // failure is excluded: the apology would fail identically.
+      if (!this.isSendLayerError(error)) {
+        const userRateSubject = this.options.identifiers.hash(queued.user.id, "rate-limit-user").hash;
+        void this.sendNoticeOncePerMinute(queued, "processingFailed", userRateSubject);
+      }
       return "failed";
+    }
+  }
+
+  private isSendLayerError(error: unknown): boolean {
+    return (
+      error instanceof WhatsAppApiError ||
+      error instanceof WhatsAppDeliveryUncertainError ||
+      isPermanentSendError(error)
+    );
+  }
+
+  // Best-effort user notice, capped at one per key per minute per user so a
+  // burst of failures or rate-limited spam cannot echo notice floods back.
+  private async sendNoticeOncePerMinute(
+    queued: QueuedMessage,
+    key: "rateLimited" | "processingFailed",
+    subjectHash: string
+  ): Promise<void> {
+    try {
+      if (!(await this.options.rateLimits.consume(`whatsapp.notice.${key}`, subjectHash, 1))) return;
+      await this.options.sender.sendText(queued.phoneE164, systemMessage(key, this.locale));
+    } catch (error) {
+      logSafe(
+        this.options.logger,
+        "debug",
+        { error, userId: queued.user.id, messageId: queued.storedId },
+        "Best-effort user notice could not be sent"
+      );
     }
   }
 

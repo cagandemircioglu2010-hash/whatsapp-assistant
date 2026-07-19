@@ -49,6 +49,7 @@
     "whatsapp:diagnose": "tsx scripts/diagnose-whatsapp.ts",
     "mock:meta": "tsx scripts/mock-meta-server.ts",
     "e2e:local": "tsx scripts/e2e-local.ts",
+    "ops:status": "tsx scripts/ops-status.ts",
     "ops:readiness": "tsx scripts/verify-production-readiness.ts",
     "ops:readiness:prod": "node dist/scripts/verify-production-readiness.js",
     "mcp:stdio": "tsx src/mcp/stdio-server.ts",

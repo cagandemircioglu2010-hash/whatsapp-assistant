@@ -72,6 +72,7 @@ const values: Array<[key: string, value: string, renderValue?: string | null]> =
   ["MESSAGE_WORKER_CONCURRENCY", "4"],
   ["DEFAULT_PHONE_COUNTRY", "TR"],
   ["COMPANY_TIMEZONE", "Europe/Istanbul"],
+  ["ASSISTANT_LOCALE", "tr"],
   ["HOST", "0.0.0.0"],
   ["PORT", "3000", "10000"],
   ["LOG_LEVEL", "info"],
