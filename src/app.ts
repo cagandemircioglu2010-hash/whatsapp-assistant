@@ -24,6 +24,7 @@ import { VersionedHmac } from "./security/keyed-hash.js";
 import { PostgresRateLimitStore } from "./security/rate-limiter.js";
 import { runDataLifecycleJob } from "./security/data-lifecycle.js";
 import { readRuntimeHealth } from "./db/readiness.js";
+import { dataDeletionPage, privacyPolicyPage, servicePage } from "./public/legal-pages.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -91,6 +92,14 @@ export async function buildApp(dependencies: AppDependencies) {
             : "Invalid request";
     return reply.code(status).send({ error: message });
   });
+
+  app.get("/", async (_request, reply) => reply.type("text/html; charset=utf-8").send(servicePage));
+  app.get("/privacy", async (_request, reply) =>
+    reply.type("text/html; charset=utf-8").send(privacyPolicyPage)
+  );
+  app.get("/data-deletion", async (_request, reply) =>
+    reply.type("text/html; charset=utf-8").send(dataDeletionPage)
+  );
 
   const encryption = dependencies.config.dataEncryption
     ? new EnvelopeEncryption(dependencies.config.dataEncryption)
