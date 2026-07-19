@@ -39,6 +39,8 @@
     "db:verify-audit": "tsx scripts/verify-audit-log.ts",
     "db:verify-audit:prod": "node dist/scripts/verify-audit-log.js",
     "db:add-user": "tsx scripts/add-whitelisted-user.ts",
+    "db:list-users": "tsx scripts/list-whitelisted-users.ts",
+    "setup:env": "tsx scripts/setup-env.ts",
     "db:set-user-active": "tsx scripts/set-user-active.ts",
     "db:set-legal-hold": "tsx scripts/set-legal-hold.ts",
     "db:set-legal-hold:prod": "node dist/scripts/set-legal-hold.js",

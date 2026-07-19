@@ -71,7 +71,9 @@ app owner can change the list; nothing in Render or this repository can.
    complete verification.
 5. Re-test: `npm run whatsapp:diagnose -- --send --to +90...`.
 
-Also make sure the same number is in the app whitelist (§2, item 1).
+Also make sure the same number is in the app whitelist (§2, item 1) —
+`npm run db:list-users` shows who is currently whitelisted and with which
+permissions.
 
 When Procon's production number arrives, register it as a real business phone
 number (WhatsApp → API Setup → Add phone number). Real numbers have no
@@ -96,6 +98,12 @@ Create a permanent token instead:
    `expires_at : never (permanent token)`.
 
 ## 5. Render deployment checklist
+
+Fast path: the repo ships a `render.yaml` Blueprint (Render → New →
+Blueprint). It creates the database and the web service with migrations in
+`preDeployCommand`; generate the secret values with
+`npm run setup:env -- --render` and paste them into the dashboard. The manual
+checklist below applies either way.
 
 - [ ] `WHATSAPP_ENABLED=true`, `LLM_ENABLED` as desired.
 - [ ] `WHATSAPP_ACCESS_TOKEN` — permanent System User token (§4).

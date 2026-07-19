@@ -133,6 +133,30 @@ describe("WhatsApp API error diagnostics", () => {
   });
 });
 
+describe("token expiry introspection", () => {
+  it("reports the expiry timestamp for a temporary token", async () => {
+    const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      response(200, { data: { is_valid: true, expires_at: expiresAt } })
+    );
+    await expect(client(fetchFn).tokenExpiresAtMs()).resolves.toBe(expiresAt * 1000);
+  });
+
+  it("reports a permanent token as never expiring", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      response(200, { data: { is_valid: true, expires_at: 0 } })
+    );
+    await expect(client(fetchFn).tokenExpiresAtMs()).resolves.toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("returns null instead of failing when introspection is unavailable", async () => {
+    const denied = vi.fn<typeof fetch>().mockResolvedValue(response(400, { error: { code: 100 } }));
+    await expect(client(denied).tokenExpiresAtMs()).resolves.toBeNull();
+    const offline = vi.fn<typeof fetch>().mockRejectedValue(new Error("offline"));
+    await expect(client(offline).tokenExpiresAtMs()).resolves.toBeNull();
+  });
+});
+
 describe("long reply chunking", () => {
   it("splits on natural boundaries and keeps every chunk under the limit", () => {
     const text = `${"a".repeat(3000)}\n\n${"b".repeat(3000)} ${"c".repeat(2000)}`;

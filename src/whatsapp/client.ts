@@ -206,6 +206,39 @@ export class WhatsAppClient implements WhatsAppSender {
     await readBoundedBody(response);
   }
 
+  // Best-effort token introspection. Temporary API Setup tokens expire after
+  // ~23 hours and are the second most common cause of dead deployments, so
+  // surfacing the expiry at boot is a real security/availability win. Returns
+  // null when the token type cannot inspect itself (normal for some tokens).
+  async tokenExpiresAtMs(): Promise<number | null> {
+    const fetchFn = this.config.fetchFn ?? fetch;
+    let response: Response;
+    try {
+      response = await fetchFn(
+        `${this.baseUrl()}/${this.config.graphApiVersion}/debug_token?input_token=${encodeURIComponent(this.config.accessToken)}`,
+        {
+          method: "GET",
+          headers: { Authorization: `Bearer ${this.config.accessToken}` },
+          signal: AbortSignal.timeout(10_000)
+        }
+      );
+    } catch {
+      return null;
+    }
+    if (!response.ok) return null;
+    const rawBody = await readBoundedBody(response);
+    if (!rawBody) return null;
+    try {
+      const body = JSON.parse(rawBody) as { data?: { expires_at?: unknown } };
+      const expiresAt = body.data?.expires_at;
+      if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) return null;
+      // expires_at === 0 means a permanent token.
+      return expiresAt === 0 ? Number.POSITIVE_INFINITY : expiresAt * 1000;
+    } catch {
+      return null;
+    }
+  }
+
   // Boot-time sanity check: confirms the token can read the configured phone
   // number. Returns safe, non-PII metadata for logging.
   async verifyConfiguration(): Promise<{ verifiedName: string | null; qualityRating: string | null }> {

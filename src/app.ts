@@ -179,6 +179,20 @@ export async function buildApp(dependencies: AppDependencies) {
             "WhatsApp configuration check failed; outbound sends will likely fail"
           );
         }
+        const expiresAtMs = await sender.tokenExpiresAtMs().catch(() => null);
+        if (expiresAtMs !== null && Number.isFinite(expiresAtMs)) {
+          const hoursLeft = Math.round((expiresAtMs - Date.now()) / 3_600_000);
+          if (hoursLeft <= 72) {
+            logSafe(
+              dependencies.logger,
+              hoursLeft <= 0 ? "error" : "warn",
+              { hoursLeft },
+              hoursLeft <= 0
+                ? "WhatsApp access token has EXPIRED; replace it with a permanent System User token"
+                : "WhatsApp access token expires soon; replace it with a permanent System User token"
+            );
+          }
+        }
       });
     }
 
