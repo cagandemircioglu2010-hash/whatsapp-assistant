@@ -71,10 +71,20 @@ export function sanitizeForLogs(value: unknown, seen = new WeakSet<object>()): u
   if (Buffer.isBuffer(value) || value instanceof Uint8Array) return "[REDACTED_BINARY]";
   if (value instanceof Error) {
     const production = process.env.NODE_ENV === "production";
+    // Typed errors may opt in to structured diagnostics (status codes, Meta
+    // error codes, hints) via a loggableDetails property. Those fields are
+    // sanitized like any other payload, so operators keep actionable detail
+    // in production without free-text messages leaking PII.
+    const loggableDetails = (value as { loggableDetails?: unknown }).loggableDetails;
+    const details =
+      loggableDetails !== null && typeof loggableDetails === "object"
+        ? sanitizeForLogs(loggableDetails, seen)
+        : undefined;
     return {
       name: value.name,
       message: production ? REDACTED : redactString(value.message),
-      stack: production ? undefined : value.stack ? redactString(value.stack) : undefined
+      stack: production ? undefined : value.stack ? redactString(value.stack) : undefined,
+      ...(details !== undefined ? { details } : {})
     };
   }
   if (seen.has(value)) return "[CIRCULAR]";
