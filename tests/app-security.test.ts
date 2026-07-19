@@ -56,6 +56,30 @@ afterEach(async () => {
 });
 
 describe("HTTP application hardening", () => {
+  it("serves public service, privacy, and data deletion pages", async () => {
+    const app = await buildApp({
+      config: config(),
+      appPool: pool(),
+      companyReadonlyPool: pool(),
+      logger: createLogger("silent")
+    });
+    apps.push(app);
+
+    const service = await app.inject({ method: "GET", url: "/" });
+    const privacy = await app.inject({ method: "GET", url: "/privacy" });
+    const deletion = await app.inject({ method: "GET", url: "/data-deletion" });
+
+    expect(service.statusCode).toBe(200);
+    expect(service.headers["content-type"]).toContain("text/html");
+    expect(service.body).toContain("WhatsApp Company Assistant");
+    expect(privacy.statusCode).toBe(200);
+    expect(privacy.body).toContain("Privacy Policy");
+    expect(privacy.body).toContain("Google Gemini");
+    expect(deletion.statusCode).toBe(200);
+    expect(deletion.body).toContain("Data Deletion Instructions");
+    expect(deletion.body).toContain("Data Deletion Request");
+  });
+
   it("sets defensive headers without exposing dependency errors", async () => {
     const app = await buildApp({
       config: config(),
