@@ -16,8 +16,9 @@ import { GeminiChatCompletionsGateway } from "./llm/gemini-chat-completions.gate
 import { CompanyMcpSessionFactory } from "./mcp/session.js";
 import { CompanyReportRepository } from "./reports/company-report.repository.js";
 import { ReportCommandRouter } from "./reports/report-command-router.js";
-import { WhatsAppClient } from "./whatsapp/client.js";
+import { WhatsAppApiError, WhatsAppClient } from "./whatsapp/client.js";
 import { registerWhatsAppRoutes } from "./whatsapp/routes.js";
+import { timingSafeStringEqual } from "./whatsapp/signature.js";
 import { EnvelopeEncryption } from "./security/encryption.js";
 import { logSafe } from "./logging/logger.js";
 import { VersionedHmac } from "./security/keyed-hash.js";
@@ -142,6 +143,7 @@ export async function buildApp(dependencies: AppDependencies) {
     responder = new FallbackAssistantResponder(llmAssistant, router, dependencies.logger);
   }
 
+  let whatsappProcessor: MessageProcessor | null = null;
   if (dependencies.config.whatsapp.enabled) {
     const sender = new WhatsAppClient({
       accessToken: dependencies.config.whatsapp.accessToken!,
@@ -161,8 +163,50 @@ export async function buildApp(dependencies: AppDependencies) {
       rateLimitPerMinute: dependencies.config.userRateLimitPerMinute,
       ingressSenderRateLimitPerMinute: dependencies.config.ingressSenderRateLimitPerMinute,
       ingressGlobalRateLimitPerMinute: dependencies.config.ingressGlobalRateLimitPerMinute,
-      workerConcurrency: dependencies.config.messageWorkerConcurrency
+      workerConcurrency: dependencies.config.messageWorkerConcurrency,
+      locale: dependencies.config.assistantLocale
     });
+    whatsappProcessor = processor;
+
+    // Boot-time configuration check: a rejected token/phone-number pair is
+    // reported loudly (with the Meta error code and remediation hint) instead
+    // of surfacing later as redacted send failures. Non-fatal by design so a
+    // Meta outage cannot block startup.
+    if (dependencies.config.nodeEnv !== "test") {
+      setImmediate(async () => {
+        try {
+          const info = await sender.verifyConfiguration();
+          logSafe(
+            dependencies.logger,
+            "info",
+            { verifiedName: info.verifiedName, qualityRating: info.qualityRating },
+            "WhatsApp configuration verified against the Graph API"
+          );
+        } catch (error) {
+          logSafe(
+            dependencies.logger,
+            "error",
+            { error },
+            "WhatsApp configuration check failed; outbound sends will likely fail"
+          );
+        }
+        const expiresAtMs = await sender.tokenExpiresAtMs().catch(() => null);
+        if (expiresAtMs !== null && Number.isFinite(expiresAtMs)) {
+          const hoursLeft = Math.round((expiresAtMs - Date.now()) / 3_600_000);
+          if (hoursLeft <= 72) {
+            logSafe(
+              dependencies.logger,
+              hoursLeft <= 0 ? "error" : "warn",
+              { hoursLeft },
+              hoursLeft <= 0
+                ? "WhatsApp access token has EXPIRED; replace it with a permanent System User token"
+                : "WhatsApp access token expires soon; replace it with a permanent System User token"
+            );
+          }
+        }
+      });
+    }
+
     await registerWhatsAppRoutes(app, {
       config: dependencies.config.whatsapp,
       processor,
@@ -177,6 +221,43 @@ export async function buildApp(dependencies: AppDependencies) {
         return state.rows[0]?.decommissioned === true;
       }
     });
+
+    if (dependencies.config.opsToken) {
+      app.get("/health/whatsapp", async (request, reply) => {
+        const token = request.headers["x-ops-token"];
+        const tokenValue = Array.isArray(token) ? token[0] : token;
+        if (!timingSafeStringEqual(tokenValue, dependencies.config.opsToken)) {
+          return reply.code(401).send({ error: "Invalid ops token" });
+        }
+        try {
+          const [info, expiresAtMs] = await Promise.all([
+            sender.verifyConfiguration(),
+            sender.tokenExpiresAtMs().catch(() => null)
+          ]);
+          const tokenExpiresInHours =
+            expiresAtMs === null || !Number.isFinite(expiresAtMs)
+              ? null
+              : Math.round((expiresAtMs - Date.now()) / 3_600_000);
+          return reply.send({
+            status: "ok",
+            verifiedName: info.verifiedName,
+            qualityRating: info.qualityRating,
+            tokenExpiresInHours,
+            delivery: processor.deliveryHealth()
+          });
+        } catch (error) {
+          const details =
+            error instanceof WhatsAppApiError
+              ? {
+                  metaErrorCode: error.loggableDetails.metaErrorCode,
+                  httpStatus: error.loggableDetails.httpStatus,
+                  hint: error.loggableDetails.hint
+                }
+              : {};
+          return reply.code(503).send({ status: "unhealthy", ...details });
+        }
+      });
+    }
 
     let recoveryRunning = false;
     let recoveryPromise: Promise<void> | null = null;
@@ -235,6 +316,9 @@ export async function buildApp(dependencies: AppDependencies) {
         health.lifecycleHealthy &&
         health.companyViewsReady &&
         health.pendingMessages < 5_000;
+      // Reported but never gates `healthy`: restarting the service cannot fix
+      // a broken Meta configuration, so this must not trip restart loops.
+      const delivery = whatsappProcessor?.deliveryHealth() ?? null;
       return reply.code(healthy ? 200 : 503).send({
         status: healthy ? "ok" : "unhealthy",
         checks: {
@@ -242,7 +326,15 @@ export async function buildApp(dependencies: AppDependencies) {
           service: health.serviceActive,
           lifecycle: health.lifecycleHealthy,
           reporting: health.companyViewsReady,
-          queue: health.pendingMessages < 5_000
+          queue: health.pendingMessages < 5_000,
+          ...(delivery
+            ? {
+                whatsappDelivery: delivery.consecutivePermanentSendFailures < 5,
+                ...(delivery.lastMetaErrorCode !== null && delivery.consecutivePermanentSendFailures > 0
+                  ? { lastMetaErrorCode: delivery.lastMetaErrorCode }
+                  : {})
+              }
+            : {})
         }
       });
     } catch {

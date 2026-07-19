@@ -1,0 +1,96 @@
+# Render Blueprint — deploy with "New > Blueprint" pointing at this repo.
+# WARNING: the plans below create paid Render resources. This file does not
+# modify an existing service unless you explicitly create or apply a Blueprint.
+# Creates a managed Postgres and the assistant web service. Secret values are
+# left unsynced (sync: false): generate them locally with
+#   npm run setup:env -- --render
+# and paste the block into the Render dashboard on first deploy.
+#
+# The database roles referenced by DATABASE_URL / COMPANY_READONLY_DATABASE_URL
+# are created once against the Render database:
+#   DATABASE_ADMIN_URL=<render external connection string> npm run db:provision-app-role
+#   COMPANY_DATABASE_ADMIN_URL=<same> npm run db:provision-readonly
+# See docs/RUNBOOK.md §5 for the full checklist.
+
+databases:
+  - name: assistant-db
+    plan: basic-256mb
+    postgresMajorVersion: "17"
+
+services:
+  - type: web
+    name: company-whatsapp-assistant
+    runtime: node
+    plan: starter
+    buildCommand: npm ci && npm run build
+    preDeployCommand: node dist/src/db/migrate.js
+    startCommand: node dist/src/server.js
+    healthCheckPath: /health/live
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "10000"
+      - key: HOST
+        value: 0.0.0.0
+      - key: LOG_LEVEL
+        value: info
+      - key: DEFAULT_PHONE_COUNTRY
+        value: TR
+      - key: COMPANY_TIMEZONE
+        value: Europe/Istanbul
+      - key: WHATSAPP_GRAPH_API_VERSION
+        value: v25.0
+      - key: REQUIRE_WHATSAPP_SIGNATURE
+        value: "true"
+      - key: WHATSAPP_ENABLED
+        value: "true"
+      # Migrations run with the database owner; the app itself should use the
+      # restricted role via DATABASE_URL once provisioned.
+      - key: DATABASE_ADMIN_URL
+        fromDatabase:
+          name: assistant-db
+          property: connectionString
+      - key: DATABASE_SSL_MODE
+        value: require
+      - key: COMPANY_DATABASE_SSL_MODE
+        value: require
+      # Everything below is a secret or account-specific: fill in the
+      # dashboard (npm run setup:env -- --render prints ready-made values).
+      - key: DATABASE_URL
+        sync: false
+      - key: COMPANY_READONLY_DATABASE_URL
+        sync: false
+      - key: IDENTIFIER_HASH_ACTIVE_KEY_ID
+        sync: false
+      - key: IDENTIFIER_HASH_KEYS
+        sync: false
+      - key: AUDIT_INTEGRITY_ACTIVE_KEY_ID
+        sync: false
+      - key: AUDIT_INTEGRITY_KEYS
+        sync: false
+      - key: DATA_ENCRYPTION_ACTIVE_KEY_ID
+        sync: false
+      - key: DATA_ENCRYPTION_KEYS
+        sync: false
+      - key: SAFETY_IDENTIFIER_SECRET
+        sync: false
+      - key: OPS_TOKEN
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: LLM_ENABLED
+        sync: false
+      - key: LLM_PROVIDER
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        sync: false

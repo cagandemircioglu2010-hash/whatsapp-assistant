@@ -68,6 +68,8 @@ const schema = z
     SAFETY_IDENTIFIER_SECRET: z.string().min(32).optional(),
     DEFAULT_PHONE_COUNTRY: z.string().length(2).default("TR"),
     COMPANY_TIMEZONE: z.string().default("Europe/Istanbul"),
+    ASSISTANT_LOCALE: z.enum(["tr", "en"]).default("tr"),
+    OPS_TOKEN: z.string().min(32).optional(),
     DATA_ENCRYPTION_ACTIVE_KEY_ID: z.string().optional(),
     DATA_ENCRYPTION_KEYS: z.string().optional(),
     DATA_ENCRYPTION_KEYS_FILE: z.string().min(1).optional(),
@@ -433,6 +435,8 @@ export type AppConfig = {
   safetyIdentifierSecret?: string;
   defaultPhoneCountry: CountryCode;
   companyTimezone: string;
+  assistantLocale: "tr" | "en";
+  opsToken?: string;
   dataEncryption: DataEncryptionConfig | null;
   messageRetentionDays: number;
   messageRecordRetentionDays: number;
@@ -499,6 +503,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
       : {}),
     defaultPhoneCountry: env.DEFAULT_PHONE_COUNTRY.toUpperCase() as CountryCode,
     companyTimezone: env.COMPANY_TIMEZONE,
+    assistantLocale: env.ASSISTANT_LOCALE,
+    ...(env.OPS_TOKEN ? { opsToken: env.OPS_TOKEN } : {}),
     dataEncryption,
     messageRetentionDays: env.MESSAGE_RETENTION_DAYS,
     messageRecordRetentionDays: env.MESSAGE_RECORD_RETENTION_DAYS,

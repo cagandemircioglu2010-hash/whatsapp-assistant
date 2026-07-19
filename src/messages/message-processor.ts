@@ -1,6 +1,7 @@
 import type { CountryCode } from "libphonenumber-js";
 import type { Logger } from "pino";
-import type { AssistantResponder } from "../assistant/types.js";
+import { systemMessage, type AssistantLocale } from "../assistant/system-messages.js";
+import type { AssistantResponder, ConversationTurn } from "../assistant/types.js";
 import type {
   AuthorizedUserIdentity,
   UserLookup,
@@ -11,7 +12,12 @@ import { logSafe } from "../logging/logger.js";
 import { normalizePhoneNumber } from "../security/phone.js";
 import type { VersionedHash, VersionedHmac } from "../security/keyed-hash.js";
 import type { RateLimitStore } from "../security/rate-limiter.js";
-import { WhatsAppDeliveryUncertainError } from "../whatsapp/client.js";
+import {
+  isPermanentSendError,
+  WhatsAppApiError,
+  WhatsAppDeliveryUncertainError
+} from "../whatsapp/client.js";
+import { metaErrorHint } from "../whatsapp/meta-errors.js";
 import type {
   IncomingWhatsAppMessage,
   WhatsAppMessageStatus,
@@ -19,6 +25,7 @@ import type {
 } from "../whatsapp/types.js";
 import type { AuditStore } from "./audit.repository.js";
 import type {
+  ConversationHistoryStore,
   MessageStore,
   MessageStatusStore,
   OutboundDeliveryStore,
@@ -40,7 +47,8 @@ type MessageProcessorOptions = {
   messages: MessageStore &
     Partial<PendingMessageStore> &
     Partial<OutboundDeliveryStore> &
-    Partial<MessageStatusStore>;
+    Partial<MessageStatusStore> &
+    Partial<ConversationHistoryStore>;
   audit: AuditStore;
   router: AssistantResponder;
   sender: WhatsAppSender;
@@ -52,6 +60,7 @@ type MessageProcessorOptions = {
   ingressSenderRateLimitPerMinute?: number;
   ingressGlobalRateLimitPerMinute?: number;
   workerConcurrency?: number;
+  locale?: AssistantLocale;
 };
 
 type QueuedMessage = {
@@ -60,7 +69,14 @@ type QueuedMessage = {
   phoneE164: string;
   senderPhone: VersionedHash;
   text: string;
+  externalMessageId: string | null;
+  messageType: string | null;
 };
+
+// Message types whose text content is meaningful to the assistant. Anything
+// else (media, contacts, locations, ...) gets a fixed notice instead of an
+// LLM round-trip over a "[image]" placeholder.
+const SUPPORTED_TEXT_TYPES = new Set(["text", "button", "interactive"]);
 
 type QueuedWork = {
   message: QueuedMessage;
@@ -85,12 +101,16 @@ export class MessageProcessor {
   private readonly ingressSenderRateLimit: number;
   private readonly ingressGlobalRateLimit: number;
   private pumpScheduled = false;
+  private consecutivePermanentSendFailures = 0;
+  private lastMetaErrorCode: number | null = null;
+  private readonly locale: AssistantLocale;
 
   constructor(private readonly options: MessageProcessorOptions) {
     this.userRateLimit = options.rateLimitPerMinute ?? 20;
     this.ingressSenderRateLimit = options.ingressSenderRateLimitPerMinute ?? 10;
     this.ingressGlobalRateLimit = options.ingressGlobalRateLimitPerMinute ?? 600;
     this.workerConcurrency = options.workerConcurrency ?? 4;
+    this.locale = options.locale ?? "en";
     if (!Number.isInteger(this.workerConcurrency) || this.workerConcurrency < 1 || this.workerConcurrency > 16) {
       throw new Error("Worker concurrency must be between 1 and 16");
     }
@@ -192,13 +212,39 @@ export class MessageProcessor {
       update.status
     );
     if (!message) return;
+    const errorCodes = (update.errors ?? []).map((statusError) => statusError.code);
+    if (update.status === "failed" && errorCodes.length > 0) {
+      logSafe(
+        this.options.logger,
+        "warn",
+        {
+          userId: message.userId,
+          messageId: message.id,
+          metaErrorCodes: errorCodes,
+          hints: errorCodes.map((code) => metaErrorHint(code, 0))
+        },
+        "Meta reported the outbound WhatsApp message as failed"
+      );
+    }
     await this.options.audit.record({
       userId: message.userId,
       eventType: "whatsapp.delivery_status",
       outcome: update.status === "failed" ? "failure" : "success",
       messageId: message.id,
-      details: { status: update.status }
+      details: {
+        status: update.status,
+        ...(errorCodes.length > 0 ? { metaErrorCodes: errorCodes } : {})
+      }
     });
+  }
+
+  // Delivery health for the /health endpoint: a run of permanent send
+  // failures means the Meta-side configuration is broken, not the service.
+  deliveryHealth(): { consecutivePermanentSendFailures: number; lastMetaErrorCode: number | null } {
+    return {
+      consecutivePermanentSendFailures: this.consecutivePermanentSendFailures,
+      lastMetaErrorCode: this.lastMetaErrorCode
+    };
   }
 
   private recoveredMessage(pending: PendingInboundMessage, identity: AuthorizedUserIdentity): QueuedMessage {
@@ -207,7 +253,9 @@ export class MessageProcessor {
       user: identity.user,
       phoneE164: identity.phoneE164,
       senderPhone: { hash: pending.senderPhoneHash, keyId: pending.senderPhoneKeyId },
-      text: pending.content ?? ""
+      text: pending.content ?? "",
+      externalMessageId: null,
+      messageType: null
     };
   }
 
@@ -263,7 +311,9 @@ export class MessageProcessor {
         user,
         phoneE164: normalizedPhone,
         senderPhone,
-        text: incoming.text
+        text: incoming.text,
+        externalMessageId: incoming.externalMessageId,
+        messageType: incoming.type
       }
     };
   }
@@ -325,13 +375,25 @@ export class MessageProcessor {
         { userId: queued.user.id, messageId: queued.storedId },
         "WhatsApp sender exceeded the per-user rate limit"
       );
+      void this.sendNoticeOncePerMinute(queued, "rateLimited", userRateSubject);
       return "rate_limited";
     }
 
+    this.acknowledgeInbound(queued);
+
     try {
-      const command = await this.options.router.handle(queued.user, queued.text, {
-        messageId: queued.storedId
-      });
+      const command =
+        queued.messageType !== null && !SUPPORTED_TEXT_TYPES.has(queued.messageType)
+          ? {
+              text: systemMessage("unsupportedType", this.localeFor(queued.user)),
+              resource: null,
+              resources: [],
+              outcome: "unsupported" as const
+            }
+          : await this.options.router.handle(queued.user, queued.text, {
+              messageId: queued.storedId,
+              ...(await this.conversationHistory(queued))
+            });
       await this.options.audit.record({
         userId: queued.user.id,
         eventType: "company.report_request",
@@ -342,6 +404,7 @@ export class MessageProcessor {
       });
 
       const delivery = await this.deliverReply(queued, command);
+      this.consecutivePermanentSendFailures = 0;
       await this.options.messages.setInboundStatus(queued.storedId, "processed");
       if (delivery === "unknown") {
         await this.options.audit.record({
@@ -368,7 +431,71 @@ export class MessageProcessor {
       return "processed";
     } catch (error) {
       await this.markUnexpectedFailure(queued.storedId, queued.user.id, error);
+      // If the failure happened before/without a send attempt (LLM crash, DB
+      // error, ...) the user would otherwise face pure silence. A send-layer
+      // failure is excluded: the apology would fail identically.
+      if (!this.isSendLayerError(error)) {
+        const userRateSubject = this.options.identifiers.hash(queued.user.id, "rate-limit-user").hash;
+        void this.sendNoticeOncePerMinute(queued, "processingFailed", userRateSubject);
+      }
       return "failed";
+    }
+  }
+
+  private localeFor(user: AuthorizedUser): AssistantLocale {
+    return user.locale ?? this.locale;
+  }
+
+  // Best-effort short-term memory for the assistant; failures degrade to a
+  // context-free answer rather than blocking the reply.
+  private async conversationHistory(queued: QueuedMessage): Promise<{ history?: ConversationTurn[] }> {
+    const recent = this.options.messages.recentConversation;
+    if (!recent) return {};
+    try {
+      const entries = await recent.call(this.options.messages, queued.user.id, queued.storedId, 6);
+      if (entries.length === 0) return {};
+      return {
+        history: entries.map((entry) => ({
+          direction: entry.direction,
+          text: entry.content.slice(0, 1_000)
+        }))
+      };
+    } catch (error) {
+      logSafe(
+        this.options.logger,
+        "debug",
+        { error, userId: queued.user.id, messageId: queued.storedId },
+        "Conversation history could not be loaded"
+      );
+      return {};
+    }
+  }
+
+  private isSendLayerError(error: unknown): boolean {
+    return (
+      error instanceof WhatsAppApiError ||
+      error instanceof WhatsAppDeliveryUncertainError ||
+      isPermanentSendError(error)
+    );
+  }
+
+  // Best-effort user notice, capped at one per key per minute per user so a
+  // burst of failures or rate-limited spam cannot echo notice floods back.
+  private async sendNoticeOncePerMinute(
+    queued: QueuedMessage,
+    key: "rateLimited" | "processingFailed",
+    subjectHash: string
+  ): Promise<void> {
+    try {
+      if (!(await this.options.rateLimits.consume(`whatsapp.notice.${key}`, subjectHash, 1))) return;
+      await this.options.sender.sendText(queued.phoneE164, systemMessage(key, this.localeFor(queued.user)));
+    } catch (error) {
+      logSafe(
+        this.options.logger,
+        "debug",
+        { error, userId: queued.user.id, messageId: queued.storedId },
+        "Best-effort user notice could not be sent"
+      );
     }
   }
 
@@ -426,15 +553,48 @@ export class MessageProcessor {
     }
   }
 
+  // Best-effort read receipt + typing indicator; never allowed to affect the
+  // reply pipeline.
+  private acknowledgeInbound(queued: QueuedMessage): void {
+    const markRead = this.options.sender.markRead;
+    if (!markRead || !queued.externalMessageId) return;
+    void markRead.call(this.options.sender, queued.externalMessageId).catch((error: unknown) => {
+      logSafe(
+        this.options.logger,
+        "debug",
+        { error, userId: queued.user.id, messageId: queued.storedId },
+        "WhatsApp read receipt could not be sent"
+      );
+    });
+  }
+
   private async markUnexpectedFailure(messageId: string, userId: string, error: unknown): Promise<void> {
-    await this.options.messages.setInboundStatus(messageId, "failed").catch(() => undefined);
+    // A permanently rejected send (expired token, recipient not allowed, ...)
+    // will fail identically on every retry, so take the message out of the
+    // recovery loop instead of burning attempts every 10 seconds.
+    const permanent = isPermanentSendError(error);
+    const metaErrorCode = error instanceof WhatsAppApiError ? error.loggableDetails.metaErrorCode : null;
+    if (error instanceof WhatsAppApiError && error.permanent) {
+      this.consecutivePermanentSendFailures += 1;
+      this.lastMetaErrorCode = metaErrorCode;
+    }
+    const markUndeliverable = this.options.messages.markInboundUndeliverable;
+    if (permanent && markUndeliverable) {
+      await markUndeliverable.call(this.options.messages, messageId).catch(() => undefined);
+    } else {
+      await this.options.messages.setInboundStatus(messageId, "failed").catch(() => undefined);
+    }
     await this.options.audit
       .record({
         userId,
         eventType: "whatsapp.processing",
         outcome: "failure",
         messageId,
-        details: { errorType: error instanceof Error ? error.name : "UnknownError" }
+        details: {
+          errorType: error instanceof Error ? error.name : "UnknownError",
+          terminal: permanent,
+          ...(metaErrorCode !== null ? { metaErrorCode } : {})
+        }
       })
       .catch(() => undefined);
     logSafe(

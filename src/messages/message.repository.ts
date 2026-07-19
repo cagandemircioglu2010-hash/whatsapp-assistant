@@ -61,6 +61,20 @@ export interface MessageStore {
 
 export interface PendingMessageStore {
   claimNextInbound(): Promise<PendingInboundMessage | null>;
+  markInboundUndeliverable?(messageId: string): Promise<void>;
+}
+
+export type ConversationHistoryEntry = {
+  direction: "inbound" | "outbound";
+  content: string;
+};
+
+export interface ConversationHistoryStore {
+  recentConversation(
+    userId: string,
+    excludeMessageId: string,
+    limit: number
+  ): Promise<ConversationHistoryEntry[]>;
 }
 
 export interface OutboundDeliveryStore {
@@ -196,6 +210,55 @@ export class MessageRepository implements MessageStore {
 
   async setInboundStatus(messageId: string, status: "processed" | "ignored" | "failed"): Promise<void> {
     await this.pool.query("UPDATE messages SET status = $2, updated_at = NOW() WHERE id = $1", [messageId, status]);
+  }
+
+  // Recent decrypted exchanges for LLM context, oldest first. Rows whose
+  // content was already purged by retention are skipped silently.
+  async recentConversation(
+    userId: string,
+    excludeMessageId: string,
+    limit: number
+  ): Promise<ConversationHistoryEntry[]> {
+    const result = await this.pool.query<{
+      id: string;
+      direction: "inbound" | "outbound";
+      content_ciphertext: string | null;
+    }>(
+      `SELECT id, direction, content_ciphertext
+       FROM messages
+       WHERE user_id = $1 AND id <> $2
+         AND direction IN ('inbound', 'outbound')
+         AND content_ciphertext IS NOT NULL
+         AND status IN ('processed', 'sent', 'delivered', 'read')
+       ORDER BY created_at DESC, id DESC
+       LIMIT $3`,
+      [userId, excludeMessageId, Math.min(Math.max(limit, 1), 20)]
+    );
+    const entries: ConversationHistoryEntry[] = [];
+    for (const row of result.rows.reverse()) {
+      try {
+        const content = this.encryption?.decrypt(
+          row.content_ciphertext!,
+          "messages.content",
+          `messages:${row.id}`
+        );
+        if (content) entries.push({ direction: row.direction, content });
+      } catch {
+        // Undecryptable rows (rotated-out keys) are skipped, not fatal.
+      }
+    }
+    return entries;
+  }
+
+  // Terminal failure: exhausting processing_attempts keeps claimNextInbound
+  // and claimInbound from ever retrying a send that Meta rejects permanently.
+  async markInboundUndeliverable(messageId: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE messages
+       SET status = 'failed', processing_attempts = GREATEST(processing_attempts, 3), updated_at = NOW()
+       WHERE id = $1`,
+      [messageId]
+    );
   }
 
   async saveOutbound(input: SaveOutboundInput): Promise<string> {

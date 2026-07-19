@@ -36,6 +36,16 @@ function formatMoney(amount: string, currency: string): string {
 
 const crossDepartmentRoles = new Set(["manager", "executive", "admin"]);
 
+const MENU_TRIGGERS = new Set(["menu", "menü", "yardim", "help", "komut", "komutlar", "?"]);
+
+// Fixed numeric shortcuts so "1" always means the same report, no matter
+// which subset the user is permitted to see.
+const MENU_ITEMS: Array<{ shortcut: string; resource: string; label: string; command: string }> = [
+  { shortcut: "1", resource: reportResources.sales, label: "Satış özeti (son 7 gün)", command: "satis ozeti" },
+  { shortcut: "2", resource: reportResources.projects, label: "Aktif projeler", command: "aktif projeler" },
+  { shortcut: "3", resource: reportResources.tasks, label: "Geciken görevler", command: "geciken gorevler" }
+];
+
 function departmentScope(user: AuthorizedUser, resource: string): string | undefined {
   if (crossDepartmentRoles.has(user.role.toLowerCase())) return undefined;
   if (!user.department) throw new PermissionDeniedError(resource);
@@ -62,7 +72,13 @@ export class ReportCommandRouter implements AssistantResponder {
     incomingText: string,
     _context?: AssistantContext
   ): Promise<AssistantResponse> {
-    const command = normalizeTurkish(incomingText);
+    let command = normalizeTurkish(incomingText);
+
+    if (MENU_TRIGGERS.has(command)) {
+      return this.menu(user);
+    }
+    const shortcut = MENU_ITEMS.find((item) => item.shortcut === command);
+    if (shortcut) command = shortcut.command;
 
     try {
       if (command.includes("satis")) {
@@ -140,7 +156,32 @@ export class ReportCommandRouter implements AssistantResponder {
       resource: null,
       resources: [],
       outcome: "unsupported",
-      text: "Şu anda desteklenen sorgular: “satış özeti”, “aktif projeler” ve “geciken görevler”."
+      text: "Şu anda desteklenen sorgular: “satış özeti”, “aktif projeler” ve “geciken görevler”. Menü için “menü” yazın."
+    };
+  }
+
+  // Permission-aware menu: only reports the user can actually read are
+  // listed, each with its stable numeric shortcut.
+  private async menu(user: AuthorizedUser): Promise<AssistantResponse> {
+    const permitted: string[] = [];
+    for (const item of MENU_ITEMS) {
+      if (await this.authorization.isAllowed(user.id, item.resource)) {
+        permitted.push(`${item.shortcut}. ${item.label}`);
+      }
+    }
+    if (permitted.length === 0) {
+      return {
+        resource: null,
+        resources: [],
+        outcome: "denied",
+        text: "Hesabınıza henüz rapor izni tanımlanmamış. Lütfen yöneticinizle iletişime geçin."
+      };
+    }
+    return {
+      resource: null,
+      resources: [],
+      outcome: "success",
+      text: `Kullanabileceğiniz raporlar:\n${permitted.join("\n")}\n\nRapor için numarasını veya adını yazmanız yeterli.`
     };
   }
 }

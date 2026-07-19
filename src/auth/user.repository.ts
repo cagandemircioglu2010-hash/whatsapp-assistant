@@ -7,6 +7,7 @@ type UserRow = {
   id: string;
   department_ciphertext: string | null;
   role: string;
+  locale: "tr" | "en" | null;
 };
 
 type UserIdentityRow = UserRow & {
@@ -51,7 +52,8 @@ export class UserRepository implements UserLookup {
         "users.department",
         row.id
       ),
-      role: row.role
+      role: row.role,
+      locale: row.locale
     };
   }
 
@@ -60,7 +62,7 @@ export class UserRepository implements UserLookup {
       .candidates(phoneE164, "phone-identifier")
       .map((candidate) => candidate.hash);
     const result = await this.pool.query<UserRow>(
-      `SELECT id, department_ciphertext, role
+      `SELECT id, department_ciphertext, role, locale
        FROM users
        WHERE is_active = TRUE
          AND phone_lookup_hash::text = ANY($1::text[])
@@ -75,7 +77,7 @@ export class UserRepository implements UserLookup {
 
   async findActiveIdentityById(userId: string): Promise<AuthorizedUserIdentity | null> {
     const result = await this.pool.query<UserIdentityRow>(
-      `SELECT id, department_ciphertext, role, phone_ciphertext
+      `SELECT id, department_ciphertext, role, locale, phone_ciphertext
        FROM users
        WHERE id = $1 AND is_active = TRUE
        LIMIT 1`,
