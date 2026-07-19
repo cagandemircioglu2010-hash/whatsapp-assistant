@@ -170,6 +170,19 @@ standalone and point a locally running service at it.
 - CI runs the mock-Meta end-to-end bridge test on every push/PR, so a
   regression in the webhook → assistant → send path fails the build before it
   reaches Render.
+- `GET /health/whatsapp` with header `x-ops-token: <WHATSAPP_VERIFY_TOKEN>` —
+  live Meta configuration probe: verified name, quality rating, token expiry
+  in hours, and current delivery health. 503 with the Meta error code and
+  hint when the configuration is broken; wire it to an uptime monitor.
+- `npm run db:export-audit -- --days 90 --format csv` — compliance export of
+  the audit log (metadata only, no message content).
+- Users can send `menü` (or `help`/`?`) for a permission-aware report menu
+  with numeric shortcuts (`1` = sales, `2` = projects, `3` = overdue tasks).
+- Per-user notice language: `npm run db:add-user -- ... --locale en`
+  overrides `ASSISTANT_LOCALE` for that user.
+- With the LLM enabled, the assistant now receives the last few decrypted
+  exchanges as context, so follow-up questions ("peki geciken görevler?")
+  resolve naturally. History respects retention: purged content is skipped.
 
 ## 9. Stress / health testing
 

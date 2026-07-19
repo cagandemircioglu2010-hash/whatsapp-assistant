@@ -152,7 +152,8 @@ beforeAll(async () => {
     "003_app_data_protection.sql",
     "004_identity_lifecycle.sql",
     "005_security_operations.sql",
-    "006_finalize_security_controls.sql"
+    "006_finalize_security_controls.sql",
+    "007_user_locale.sql"
   ]) {
     await db.exec(await readFile(new URL(`../migrations/${filename}`, import.meta.url), "utf8"));
   }

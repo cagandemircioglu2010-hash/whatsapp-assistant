@@ -1,7 +1,7 @@
 import type { CountryCode } from "libphonenumber-js";
 import type { Logger } from "pino";
 import { systemMessage, type AssistantLocale } from "../assistant/system-messages.js";
-import type { AssistantResponder } from "../assistant/types.js";
+import type { AssistantResponder, ConversationTurn } from "../assistant/types.js";
 import type {
   AuthorizedUserIdentity,
   UserLookup,
@@ -25,6 +25,7 @@ import type {
 } from "../whatsapp/types.js";
 import type { AuditStore } from "./audit.repository.js";
 import type {
+  ConversationHistoryStore,
   MessageStore,
   MessageStatusStore,
   OutboundDeliveryStore,
@@ -46,7 +47,8 @@ type MessageProcessorOptions = {
   messages: MessageStore &
     Partial<PendingMessageStore> &
     Partial<OutboundDeliveryStore> &
-    Partial<MessageStatusStore>;
+    Partial<MessageStatusStore> &
+    Partial<ConversationHistoryStore>;
   audit: AuditStore;
   router: AssistantResponder;
   sender: WhatsAppSender;
@@ -383,13 +385,14 @@ export class MessageProcessor {
       const command =
         queued.messageType !== null && !SUPPORTED_TEXT_TYPES.has(queued.messageType)
           ? {
-              text: systemMessage("unsupportedType", this.locale),
+              text: systemMessage("unsupportedType", this.localeFor(queued.user)),
               resource: null,
               resources: [],
               outcome: "unsupported" as const
             }
           : await this.options.router.handle(queued.user, queued.text, {
-              messageId: queued.storedId
+              messageId: queued.storedId,
+              ...(await this.conversationHistory(queued))
             });
       await this.options.audit.record({
         userId: queued.user.id,
@@ -439,6 +442,35 @@ export class MessageProcessor {
     }
   }
 
+  private localeFor(user: AuthorizedUser): AssistantLocale {
+    return user.locale ?? this.locale;
+  }
+
+  // Best-effort short-term memory for the assistant; failures degrade to a
+  // context-free answer rather than blocking the reply.
+  private async conversationHistory(queued: QueuedMessage): Promise<{ history?: ConversationTurn[] }> {
+    const recent = this.options.messages.recentConversation;
+    if (!recent) return {};
+    try {
+      const entries = await recent.call(this.options.messages, queued.user.id, queued.storedId, 6);
+      if (entries.length === 0) return {};
+      return {
+        history: entries.map((entry) => ({
+          direction: entry.direction,
+          text: entry.content.slice(0, 1_000)
+        }))
+      };
+    } catch (error) {
+      logSafe(
+        this.options.logger,
+        "debug",
+        { error, userId: queued.user.id, messageId: queued.storedId },
+        "Conversation history could not be loaded"
+      );
+      return {};
+    }
+  }
+
   private isSendLayerError(error: unknown): boolean {
     return (
       error instanceof WhatsAppApiError ||
@@ -456,7 +488,7 @@ export class MessageProcessor {
   ): Promise<void> {
     try {
       if (!(await this.options.rateLimits.consume(`whatsapp.notice.${key}`, subjectHash, 1))) return;
-      await this.options.sender.sendText(queued.phoneE164, systemMessage(key, this.locale));
+      await this.options.sender.sendText(queued.phoneE164, systemMessage(key, this.localeFor(queued.user)));
     } catch (error) {
       logSafe(
         this.options.logger,

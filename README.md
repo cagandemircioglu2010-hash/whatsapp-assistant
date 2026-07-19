@@ -326,6 +326,7 @@ npm run whatsapp:diagnose                          # token + phone number ID + i
 npm run whatsapp:diagnose -- --send --to +90...    # canlı test mesajı, tam Meta hatasıyla
 npm run db:list-users                              # whitelist'teki kullanıcıları göster
 npm run ops:status                                 # tek komutla operasyonel durum özeti
+npm run db:export-audit                            # denetim kaydını JSON/CSV olarak dışa aktar
 npm run e2e:local                                  # kimlik bilgisi gerektirmeyen uçtan uca test
 npm run mock:meta                                  # sahte Graph API'yi tek başına çalıştır
 ```

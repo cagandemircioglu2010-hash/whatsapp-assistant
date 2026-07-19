@@ -37,6 +37,7 @@
     "db:erase-user-data": "tsx scripts/erase-user-data.ts",
     "db:erase-user-data:prod": "node dist/scripts/erase-user-data.js",
     "db:verify-audit": "tsx scripts/verify-audit-log.ts",
+    "db:export-audit": "tsx scripts/export-audit-log.ts",
     "db:verify-audit:prod": "node dist/scripts/verify-audit-log.js",
     "db:add-user": "tsx scripts/add-whitelisted-user.ts",
     "db:list-users": "tsx scripts/list-whitelisted-users.ts",

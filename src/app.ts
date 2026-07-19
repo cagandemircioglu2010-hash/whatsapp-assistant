@@ -16,8 +16,9 @@ import { GeminiChatCompletionsGateway } from "./llm/gemini-chat-completions.gate
 import { CompanyMcpSessionFactory } from "./mcp/session.js";
 import { CompanyReportRepository } from "./reports/company-report.repository.js";
 import { ReportCommandRouter } from "./reports/report-command-router.js";
-import { WhatsAppClient } from "./whatsapp/client.js";
+import { WhatsAppApiError, WhatsAppClient } from "./whatsapp/client.js";
 import { registerWhatsAppRoutes } from "./whatsapp/routes.js";
+import { timingSafeStringEqual } from "./whatsapp/signature.js";
 import { EnvelopeEncryption } from "./security/encryption.js";
 import { logSafe } from "./logging/logger.js";
 import { VersionedHmac } from "./security/keyed-hash.js";
@@ -209,6 +210,44 @@ export async function buildApp(dependencies: AppDependencies) {
            ) AS decommissioned`
         );
         return state.rows[0]?.decommissioned === true;
+      }
+    });
+
+    // On-demand Meta configuration probe for operators and uptime monitors.
+    // Protected by the webhook verify token (constant-time compare) so it
+    // cannot be used anonymously to drive Graph API traffic.
+    app.get("/health/whatsapp", async (request, reply) => {
+      const token = request.headers["x-ops-token"];
+      const tokenValue = Array.isArray(token) ? token[0] : token;
+      if (!timingSafeStringEqual(tokenValue, dependencies.config.whatsapp.verifyToken)) {
+        return reply.code(401).send({ error: "Invalid ops token" });
+      }
+      try {
+        const [info, expiresAtMs] = await Promise.all([
+          sender.verifyConfiguration(),
+          sender.tokenExpiresAtMs().catch(() => null)
+        ]);
+        const tokenExpiresInHours =
+          expiresAtMs === null || !Number.isFinite(expiresAtMs)
+            ? null
+            : Math.round((expiresAtMs - Date.now()) / 3_600_000);
+        return reply.send({
+          status: "ok",
+          verifiedName: info.verifiedName,
+          qualityRating: info.qualityRating,
+          tokenExpiresInHours,
+          delivery: processor.deliveryHealth()
+        });
+      } catch (error) {
+        const details =
+          error instanceof WhatsAppApiError
+            ? {
+                metaErrorCode: error.loggableDetails.metaErrorCode,
+                httpStatus: error.loggableDetails.httpStatus,
+                hint: error.loggableDetails.hint
+              }
+            : {};
+        return reply.code(503).send({ status: "unhealthy", ...details });
       }
     });
 
