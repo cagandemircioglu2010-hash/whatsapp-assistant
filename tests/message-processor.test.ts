@@ -151,7 +151,12 @@ describe("message processor", () => {
 
     expect(await instance.process(incoming)).toBe("processed");
     expect(await instance.process({ ...incoming, externalMessageId: "wamid.rate.2" })).toBe("rate_limited");
-    expect(sender.calls).toHaveLength(1);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // The report pipeline ran exactly once; the extra send is the deliberate
+    // "slow down" notice, itself capped at one per minute.
+    const noticeCalls = sender.calls.filter((call) => call.text.includes("too quickly"));
+    expect(noticeCalls).toHaveLength(1);
+    expect(sender.calls).toHaveLength(2);
     expect(audit.events.some((event) => event.eventType === "whatsapp.rate_limit")).toBe(true);
   });
 

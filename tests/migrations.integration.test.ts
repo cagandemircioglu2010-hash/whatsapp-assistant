@@ -152,7 +152,8 @@ beforeAll(async () => {
     "003_app_data_protection.sql",
     "004_identity_lifecycle.sql",
     "005_security_operations.sql",
-    "006_finalize_security_controls.sql"
+    "006_finalize_security_controls.sql",
+    "007_user_locale.sql"
   ]) {
     await db.exec(await readFile(new URL(`../migrations/${filename}`, import.meta.url), "utf8"));
   }
@@ -330,7 +331,9 @@ describe("PostgreSQL migrations", () => {
       release: () => undefined
     };
     const reports = new CompanyReportRepository({ connect: async () => client } as unknown as Pool);
-    const today = new Date().toISOString().slice(0, 10);
+    // sales_daily buckets by Europe/Istanbul dates, so "today" must be
+    // computed in that timezone or the test fails between 21:00 and 24:00 UTC.
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Istanbul" }).format(new Date());
     const [sales, projects, tasks] = await Promise.all([
       reports.getSalesSummary({ startDate: today, endDate: today }),
       reports.getActiveProjects({ limit: 10 }),

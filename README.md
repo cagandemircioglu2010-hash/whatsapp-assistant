@@ -313,6 +313,28 @@ npm run security:scan
 npm audit --omit=dev --audit-level=moderate
 ```
 
+## Sorun giderme ve operasyon
+
+Teslimat hataları (131030, süresi dolmuş token vb.), Render deployment
+checklist'i ve Meta konsol adımları için [docs/RUNBOOK.md](docs/RUNBOOK.md)
+dosyasına bakın. Hızlı araçlar:
+
+```bash
+npm run setup:env                                  # güçlü rastgele secret'larla .env üret
+npm run setup:env -- --render                      # Render panosuna yapıştırılacak env bloğu
+npm run whatsapp:diagnose                          # token + phone number ID + izin kontrolü
+npm run whatsapp:diagnose -- --send --to +90...    # canlı test mesajı, tam Meta hatasıyla
+npm run db:list-users                              # whitelist'teki kullanıcıları göster
+npm run ops:status                                 # tek komutla operasyonel durum özeti
+npm run db:export-audit                            # denetim kaydını JSON/CSV olarak dışa aktar
+npm run e2e:local                                  # kimlik bilgisi gerektirmeyen uçtan uca test
+npm run mock:meta                                  # sahte Graph API'yi tek başına çalıştır
+```
+
+Render'a tek tıkla kurulum için repo kökündeki `render.yaml` Blueprint'i
+kullanılabilir; servis açılışta token'ın süresini de kontrol eder ve süresi
+yaklaşan/geçmiş token'ları loglarda uyarır.
+
 Repository public kalacaksa GitHub Settings altında ayrıca branch ruleset, required CI/CodeQL/supply-chain checks,
 en az bir review, conversation resolution, signed commits, secret scanning, push protection ve private vulnerability
 reporting etkinleştirilmelidir. Bunlar repository dosyasıyla güvenilir biçimde zorlanamaz.

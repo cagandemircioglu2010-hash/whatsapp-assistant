@@ -22,6 +22,7 @@ function config(): AppConfig {
     safetyIdentifierSecret: "s".repeat(32),
     defaultPhoneCountry: "TR",
     companyTimezone: "Europe/Istanbul",
+    assistantLocale: "tr" as const,
     dataEncryption: null,
     messageRetentionDays: 30,
     messageRecordRetentionDays: 90,

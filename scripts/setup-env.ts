@@ -1,0 +1,136 @@
+import { randomBytes } from "node:crypto";
+import { existsSync, writeFileSync } from "node:fs";
+
+// Onboarding bootstrap: generates a complete .env with strong random secrets
+// so a new deployment never starts from hand-rolled key material.
+//
+//   npm run setup:env                       # writes .env (refuses to overwrite)
+//   npm run setup:env -- --force            # overwrite an existing .env
+//   npm run setup:env -- --render           # print the Render env-var subset instead
+//
+// Meta/LLM credentials cannot be generated; they stay as placeholders with
+// pointers to where each value comes from.
+
+const force = process.argv.includes("--force");
+const renderOnly = process.argv.includes("--render");
+
+const year = new Date().getFullYear();
+const keyId = `local_${year}`;
+
+function base64Key(): string {
+  return randomBytes(32).toString("base64");
+}
+
+function password(): string {
+  return randomBytes(24).toString("base64url");
+}
+
+const postgresPassword = password();
+const appRuntimePassword = password();
+const readonlyPassword = password();
+
+const values: Array<[key: string, value: string, renderValue?: string | null]> = [
+  ["POSTGRES_PASSWORD", postgresPassword, null],
+  ["DATABASE_ADMIN_URL", `postgresql://postgres:${postgresPassword}@localhost:5432/company_assistant`, null],
+  ["APP_RUNTIME_USER", "company_assistant_app"],
+  ["APP_RUNTIME_PASSWORD", appRuntimePassword],
+  [
+    "DATABASE_URL",
+    `postgresql://company_assistant_app:${appRuntimePassword}@localhost:5432/company_assistant`,
+    "<from your managed Postgres, using the restricted app role>"
+  ],
+  ["DATABASE_SSL_MODE", "disable", "verify-full"],
+  ["DATABASE_CA_CERT_FILE", "", ""],
+  ["COMPANY_DATABASE_ADMIN_URL", `postgresql://postgres:${postgresPassword}@localhost:5432/company_assistant`, null],
+  ["COMPANY_READONLY_USER", "company_assistant_reader"],
+  ["COMPANY_READONLY_PASSWORD", readonlyPassword],
+  [
+    "COMPANY_READONLY_DATABASE_URL",
+    `postgresql://company_assistant_reader:${readonlyPassword}@localhost:5432/company_assistant`,
+    "<from your managed Postgres, using the read-only reporting role>"
+  ],
+  ["COMPANY_DATABASE_SSL_MODE", "disable", "verify-full"],
+  ["COMPANY_DATABASE_CA_CERT_FILE", "", ""],
+  ["IDENTIFIER_HASH_ACTIVE_KEY_ID", keyId],
+  ["IDENTIFIER_HASH_KEYS", JSON.stringify({ [keyId]: base64Key() })],
+  ["IDENTIFIER_HASH_KEYS_FILE", "", ""],
+  ["AUDIT_INTEGRITY_ACTIVE_KEY_ID", keyId],
+  ["AUDIT_INTEGRITY_KEYS", JSON.stringify({ [keyId]: base64Key() })],
+  ["AUDIT_INTEGRITY_KEYS_FILE", "", ""],
+  ["SAFETY_IDENTIFIER_SECRET", randomBytes(24).toString("base64url")],
+  ["DATA_ENCRYPTION_ACTIVE_KEY_ID", keyId],
+  ["DATA_ENCRYPTION_KEYS", JSON.stringify({ [keyId]: base64Key() })],
+  ["DATA_ENCRYPTION_KEYS_FILE", "", ""],
+  ["MESSAGE_RETENTION_DAYS", "30"],
+  ["MESSAGE_RECORD_RETENTION_DAYS", "90"],
+  ["AUDIT_RETENTION_DAYS", "365"],
+  ["WEBHOOK_BODY_LIMIT_BYTES", "262144"],
+  ["USER_RATE_LIMIT_PER_MINUTE", "20"],
+  ["INGRESS_SENDER_RATE_LIMIT_PER_MINUTE", "60"],
+  ["INGRESS_GLOBAL_RATE_LIMIT_PER_MINUTE", "600"],
+  ["DATA_LIFECYCLE_INTERVAL_MINUTES", "60"],
+  ["MESSAGE_WORKER_CONCURRENCY", "4"],
+  ["DEFAULT_PHONE_COUNTRY", "TR"],
+  ["COMPANY_TIMEZONE", "Europe/Istanbul"],
+  ["ASSISTANT_LOCALE", "tr"],
+  ["OPS_TOKEN", randomBytes(24).toString("base64url")],
+  ["HOST", "0.0.0.0"],
+  ["PORT", "3000", "10000"],
+  ["LOG_LEVEL", "info"],
+  ["WHATSAPP_ENABLED", "false", "true"],
+  ["WHATSAPP_VERIFY_TOKEN", randomBytes(16).toString("hex")],
+  ["WHATSAPP_ACCESS_TOKEN", "", "<permanent System User token — see docs/RUNBOOK.md §4>"],
+  ["WHATSAPP_PHONE_NUMBER_ID", "", "<numeric ID from Meta > WhatsApp > API Setup>"],
+  ["WHATSAPP_GRAPH_API_VERSION", "v25.0"],
+  ["META_APP_SECRET", "", "<Meta app dashboard > Settings > Basic > App secret>"],
+  ["REQUIRE_WHATSAPP_SIGNATURE", "true"],
+  ["WHATSAPP_DEBUG_LOGGING", "false"],
+  ["LLM_ENABLED", "false", "true"],
+  ["LLM_PROVIDER", "gemini"],
+  ["GEMINI_API_KEY", "", "<aistudio.google.com API key>"],
+  ["GEMINI_MODEL", "gemini-3.5-flash"],
+  ["OPENAI_API_KEY", "", ""],
+  ["OPENAI_MODEL", "gpt-5.6-terra"],
+  ["OPENAI_REASONING_EFFORT", "low"],
+  ["LLM_MAX_TOOL_CALLS", "4"],
+  ["LLM_MAX_OUTPUT_TOKENS", "700"],
+  ["LLM_TIMEOUT_MS", "25000"],
+  ["MCP_ACTOR_PHONE", "", null]
+];
+
+if (renderOnly) {
+  process.stdout.write("# Paste into Render > your service > Environment.\n");
+  process.stdout.write("# Values in <angle brackets> must be filled in by hand; the rest are\n");
+  process.stdout.write("# freshly generated secrets safe to use as-is.\n");
+  process.stdout.write("NODE_ENV=production\n");
+  for (const [key, value, renderValue] of values) {
+    if (renderValue === null) continue;
+    process.stdout.write(`${key}=${renderValue ?? value}\n`);
+  }
+  process.exit(0);
+}
+
+if (existsSync(".env") && !force) {
+  process.stderr.write(".env already exists. Re-run with -- --force to overwrite it.\n");
+  process.exit(1);
+}
+
+const lines = [
+  "# Generated by npm run setup:env — secrets below are unique to this machine.",
+  "# Fill in the empty WHATSAPP_* / META_APP_SECRET / LLM values, then follow",
+  "# docs/RUNBOOK.md §5 for the deployment checklist.",
+  ...values.map(([key, value]) => `${key}=${value}`)
+];
+writeFileSync(".env", `${lines.join("\n")}\n`, { mode: 0o600 });
+
+process.stdout.write(".env written with freshly generated secrets (file mode 600).\n\n");
+process.stdout.write("Still needed by hand:\n");
+process.stdout.write("  WHATSAPP_ACCESS_TOKEN   Meta > WhatsApp > API Setup (permanent token: RUNBOOK §4)\n");
+process.stdout.write("  WHATSAPP_PHONE_NUMBER_ID  same page, the numeric ID\n");
+process.stdout.write("  META_APP_SECRET         Meta app > Settings > Basic\n");
+process.stdout.write("  GEMINI_API_KEY / OPENAI_API_KEY  if LLM_ENABLED=true\n\n");
+process.stdout.write("Next steps:\n");
+process.stdout.write("  docker compose up -d && npm run db:migrate\n");
+process.stdout.write("  npm run db:provision-app-role && npm run db:provision-readonly\n");
+process.stdout.write("  npm run db:add-user -- --phone \"+90...\" --name \"Name\" --permissions \"company.sales\"\n");
+process.stdout.write("  npm run whatsapp:diagnose\n");

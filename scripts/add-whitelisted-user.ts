@@ -29,6 +29,7 @@ const rawPhone = argument("phone");
 const fullName = argument("name");
 const department = argument("department") ?? null;
 const role = argument("role") ?? "employee";
+const locale = argument("locale") ?? null;
 const requestedPermissions = (argument("permissions") ?? "")
   .split(",")
   .map((value) => value.trim())
@@ -46,6 +47,7 @@ if (!phone) throw new Error("Phone number is not valid");
 if (fullName.trim().length < 2 || fullName.trim().length > 120) throw new Error("Name must be 2-120 characters");
 if (department && department.trim().length > 100) throw new Error("Department must not exceed 100 characters");
 if (!allowedRoles.has(role)) throw new Error("Role must be employee, manager, executive, or admin");
+if (locale !== null && locale !== "tr" && locale !== "en") throw new Error("Locale must be tr or en");
 if (requestedPermissions.some((resource) => !allowedResources.has(resource))) {
   throw new Error(`Permissions must be one of: ${[...allowedResources].join(", ")}`);
 }
@@ -80,7 +82,7 @@ try {
              phone_ciphertext = $4, phone_key_id = $5,
              full_name_ciphertext = $6, full_name_key_id = $7,
              department_ciphertext = $8, department_key_id = $9,
-             role = $10, is_active = TRUE, updated_at = NOW()
+             role = $10, locale = $11, is_active = TRUE, updated_at = NOW()
          WHERE id = $1
          RETURNING id`,
         [
@@ -93,7 +95,8 @@ try {
           protectedFullName.keyId,
           protectedDepartment?.ciphertext ?? null,
           protectedDepartment?.keyId ?? null,
-          role
+          role,
+          locale
         ]
       )
     : await client.query<{ id: string }>(
@@ -101,8 +104,8 @@ try {
            id, phone_lookup_hash, phone_lookup_key_id, phone_ciphertext, phone_key_id,
            full_name_ciphertext, full_name_key_id,
            department_ciphertext, department_key_id,
-           role, is_active
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE)
+           role, locale, is_active
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, TRUE)
          RETURNING id`,
         [
           existingId,
@@ -114,7 +117,8 @@ try {
           protectedFullName.keyId,
           protectedDepartment?.ciphertext ?? null,
           protectedDepartment?.keyId ?? null,
-          role
+          role,
+          locale
         ]
       );
   const userId = userResult.rows[0]?.id;

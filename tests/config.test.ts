@@ -101,6 +101,11 @@ describe("application configuration", () => {
     ).toBe("development");
   });
 
+  it("accepts only a strong dedicated operations token", () => {
+    expect(() => loadConfig({ ...baseEnvironment, OPS_TOKEN: "too-short" })).toThrow("OPS_TOKEN");
+    expect(loadConfig({ ...baseEnvironment, OPS_TOKEN: "o".repeat(32) }).opsToken).toBe("o".repeat(32));
+  });
+
   it("rejects non-PostgreSQL connection URLs", () => {
     expect(() => loadConfig({ ...baseEnvironment, DATABASE_URL: "https://example.com/database" })).toThrow(
       "PostgreSQL"
