@@ -1,6 +1,12 @@
 export type AssistantLocale = "tr" | "en";
 
-export type SystemMessageKey = "unsupportedType" | "rateLimited" | "processingFailed";
+export type SystemMessageKey =
+  | "unsupportedType"
+  | "rateLimited"
+  | "processingFailed"
+  | "privacyInfo"
+  | "erasureRequested"
+  | "accessRequested";
 
 // User-facing notices the pipeline sends on its own (no LLM involved).
 // ASSISTANT_LOCALE picks the language; report content itself is produced by
@@ -17,6 +23,20 @@ const SYSTEM_MESSAGES: Record<SystemMessageKey, Record<AssistantLocale, string>>
   processingFailed: {
     tr: "Üzgünüm, şu anda cevap veremiyorum. Lütfen kısa bir süre sonra tekrar deneyin.",
     en: "Sorry, I can't answer right now. Please try again shortly."
+  },
+  privacyInfo: {
+    tr:
+      "Gizlilik: Hakkınızda yalnızca şifreli telefon numaranız, departman/rol bilginiz, saklama süresi boyunca mesaj içerikleriniz ve işlem kayıtlarının denetim üst verisi tutulur. Verilerinizin silinmesini istemek için \"verilerimi sil\" yazın.",
+    en:
+      "Privacy: We hold only your encrypted phone number, your department/role, your message content for the retention window, and audit metadata of actions. To request erasure of your data, reply \"delete my data\"."
+  },
+  erasureRequested: {
+    tr: "Silme talebiniz alındı ve kaydedildi. Bir yönetici talebinizi işleme alacaktır.",
+    en: "Your erasure request has been received and logged. An administrator will process it."
+  },
+  accessRequested: {
+    tr: "Erişim talebiniz alındı ve kaydedildi. Bir yönetici en kısa sürede değerlendirecektir.",
+    en: "Your access request has been received and logged. An administrator will review it shortly."
   }
 };
 

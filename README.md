@@ -189,6 +189,40 @@ npm run db:add-user -- \
 npm run db:set-user-active -- --phone "+905551234567" --active false
 ```
 
+Birden çok kullanıcıyı tek seferde eklemek için JSON dosyasıyla toplu yükleme
+(tüm satırlar önce doğrulanır, sonra tek transaction'da uygulanır):
+
+```bash
+# users.json: [{ "phone": "+90...", "name": "Ada", "role": "employee",
+#               "department": "Sales", "locale": "tr",
+#               "permissions": ["company.sales"] }]
+npm run db:whitelist-batch -- --file users.json
+```
+
+Kullanıcılar WhatsApp üzerinden "erişim istiyorum" yazarak erişim, "verilerimi
+sil" yazarak silme talebi oluşturabilir. Bu talepler yalnızca denetim kaydına
+yazılır (çalışan servise whitelist yazma yetkisi verilmez); operatör görüntüler:
+
+```bash
+npm run db:list-access-requests            # son 14 gün, maskeli telefonlar
+npm run db:list-access-requests -- --days 30 --full
+```
+
+## Kendi kendine servis komutları ve güvenlik
+
+- **Gizlilik / KVKK**: kullanıcı "gizlilik" yazınca hangi verilerin tutulduğunu
+  öğrenir; "verilerimi sil" ile silme talebi denetim kaydına düşer.
+- **Kötüye kullanım kilidi**: bir gönderici dakikada
+  `ABUSE_LOCKOUT_THRESHOLD_PER_MINUTE` sınırını aşan yetkisiz mesaj gönderirse
+  kalan süre boyunca sessizce yok sayılır ve `whatsapp.lockout` olarak
+  denetlenir (`/health` üzerinde `lockedOutSenders`).
+- **Replay koruması**: `WEBHOOK_MESSAGE_MAX_AGE_SECONDS` > 0 ise Meta zaman
+  damgası pencere dışındaki webhook mesajları reddedilir (imza doğrulamasına ek).
+- **İmzalı olay bildirimleri**: `INTEGRATION_WEBHOOK_URL` +
+  `INTEGRATION_WEBHOOK_SECRET` ayarlıysa kilitlenme ve kalıcı gönderim
+  hataları, gövde üzerinden HMAC (`x-assistant-signature`) ile imzalanıp POST
+  edilir. Varsayılan olarak kapalıdır ve asıl akışı hiçbir zaman bloke etmez.
+
 ## LLM sağlayıcısı
 
 Ücretsiz-katman testleri için Gemini kullanılabilir:
