@@ -183,6 +183,32 @@ standalone and point a locally running service at it.
 - With the LLM enabled, the assistant now receives the last few decrypted
   exchanges as context, so follow-up questions ("peki geciken görevler?")
   resolve naturally. History respects retention: purged content is skipped.
+- `npm run db:whitelist-batch -- --file users.json` — onboard many users in
+  one atomic transaction (all rows validated first; the error names the bad
+  row). Same fields as `db:add-user`.
+- `npm run db:list-access-requests [-- --days 30 --full]` — the access and
+  right-to-erasure requests users raised from WhatsApp ("erişim istiyorum" /
+  "verilerimi sil"). The running service only writes these as audit events; an
+  operator fulfils them with `db:add-user` / `db:erase-user-data`.
+
+## 8a. Abuse lockout, replay protection, and integration events
+
+- **Sender lockout**: more than `ABUSE_LOCKOUT_THRESHOLD_PER_MINUTE` (default
+  10) unauthorized messages from one sender within a minute trips a silent
+  lockout for the rest of the window — no reply, audited as `whatsapp.lockout`,
+  counted as `lockedOutSenders` in `GET /health`. Legitimate whitelisted users
+  are never affected.
+- **Replay protection**: set `WEBHOOK_MESSAGE_MAX_AGE_SECONDS` (e.g. 300) to
+  reject inbound webhook messages whose Meta timestamp is outside the window,
+  on top of the existing signature check and message-id dedup. `0` (default)
+  disables it. Rejected messages are audited as `whatsapp.replay_rejected`.
+- **Integration webhook**: set `INTEGRATION_WEBHOOK_URL` +
+  `INTEGRATION_WEBHOOK_SECRET` to forward operational events (`sender.locked_out`,
+  `send.permanent_failure`) as HMAC-signed POSTs. The receiver recomputes
+  `sha256=HMAC(secret, body)` and compares against `x-assistant-signature`;
+  `x-assistant-timestamp` is inside the signed body for freshness. Payloads
+  carry only non-reversible references (hashes, Meta error codes) — never
+  message content. Disabled by default; delivery never blocks the pipeline.
 
 ## 9. Stress / health testing
 

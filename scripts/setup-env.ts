@@ -70,6 +70,8 @@ const values: Array<[key: string, value: string, renderValue?: string | null]> =
   ["INGRESS_GLOBAL_RATE_LIMIT_PER_MINUTE", "600"],
   ["DATA_LIFECYCLE_INTERVAL_MINUTES", "60"],
   ["MESSAGE_WORKER_CONCURRENCY", "4"],
+  ["ABUSE_LOCKOUT_THRESHOLD_PER_MINUTE", "10"],
+  ["WEBHOOK_MESSAGE_MAX_AGE_SECONDS", "0"],
   ["DEFAULT_PHONE_COUNTRY", "TR"],
   ["COMPANY_TIMEZONE", "Europe/Istanbul"],
   ["ASSISTANT_LOCALE", "tr"],
@@ -95,6 +97,9 @@ const values: Array<[key: string, value: string, renderValue?: string | null]> =
   ["LLM_MAX_TOOL_CALLS", "4"],
   ["LLM_MAX_OUTPUT_TOKENS", "700"],
   ["LLM_TIMEOUT_MS", "25000"],
+  ["INTEGRATION_WEBHOOK_URL", "", ""],
+  ["INTEGRATION_WEBHOOK_SECRET", "", ""],
+  ["INTEGRATION_WEBHOOK_TIMEOUT_MS", "4000"],
   ["MCP_ACTOR_PHONE", "", null]
 ];
 

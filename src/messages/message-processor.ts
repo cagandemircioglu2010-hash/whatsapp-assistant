@@ -18,6 +18,7 @@ import {
   WhatsAppDeliveryUncertainError
 } from "../whatsapp/client.js";
 import { metaErrorHint } from "../whatsapp/meta-errors.js";
+import { NoopEventNotifier, type EventNotifier } from "../integrations/event-notifier.js";
 import type {
   IncomingWhatsAppMessage,
   WhatsAppMessageStatus,
@@ -40,6 +41,7 @@ export type ProcessingResult =
   | "rate_limited"
   | "delivery_unknown"
   | "duplicate"
+  | "stale"
   | "failed";
 
 type MessageProcessorOptions = {
@@ -61,6 +63,15 @@ type MessageProcessorOptions = {
   ingressGlobalRateLimitPerMinute?: number;
   workerConcurrency?: number;
   locale?: AssistantLocale;
+  // Repeated unauthorized inbound from one sender within a minute past this
+  // count trips a lockout for the remainder of the window. Defaults to 10.
+  abuseLockoutThreshold?: number;
+  // Inbound webhook messages whose Meta timestamp is older or further in the
+  // future than this many seconds are rejected as stale (replay hardening).
+  // 0 disables the check. Defaults to 0 (off) for backward compatibility.
+  messageMaxAgeSeconds?: number;
+  // Optional sink for operational events (lockouts, permanent send failures).
+  eventNotifier?: EventNotifier;
 };
 
 type QueuedMessage = {
@@ -103,7 +114,11 @@ export class MessageProcessor {
   private pumpScheduled = false;
   private consecutivePermanentSendFailures = 0;
   private lastMetaErrorCode: number | null = null;
+  private lockedOutSenders = 0;
   private readonly locale: AssistantLocale;
+  private readonly abuseLockoutThreshold: number;
+  private readonly messageMaxAgeSeconds: number;
+  private readonly eventNotifier: EventNotifier;
 
   constructor(private readonly options: MessageProcessorOptions) {
     this.userRateLimit = options.rateLimitPerMinute ?? 20;
@@ -111,6 +126,15 @@ export class MessageProcessor {
     this.ingressGlobalRateLimit = options.ingressGlobalRateLimitPerMinute ?? 600;
     this.workerConcurrency = options.workerConcurrency ?? 4;
     this.locale = options.locale ?? "en";
+    this.abuseLockoutThreshold = options.abuseLockoutThreshold ?? 10;
+    this.messageMaxAgeSeconds = options.messageMaxAgeSeconds ?? 0;
+    this.eventNotifier = options.eventNotifier ?? new NoopEventNotifier();
+    if (!Number.isInteger(this.abuseLockoutThreshold) || this.abuseLockoutThreshold < 1) {
+      throw new Error("Abuse lockout threshold must be a positive integer");
+    }
+    if (!Number.isInteger(this.messageMaxAgeSeconds) || this.messageMaxAgeSeconds < 0) {
+      throw new Error("Message max age must be a non-negative integer");
+    }
     if (!Number.isInteger(this.workerConcurrency) || this.workerConcurrency < 1 || this.workerConcurrency > 16) {
       throw new Error("Worker concurrency must be between 1 and 16");
     }
@@ -247,6 +271,46 @@ export class MessageProcessor {
     };
   }
 
+  // Running count of sender lockouts triggered since boot, for the /health
+  // endpoint and operational visibility.
+  securityHealth(): { lockedOutSenders: number } {
+    return { lockedOutSenders: this.lockedOutSenders };
+  }
+
+  // Fresh iff the check is enabled and the Meta timestamp (unix seconds) is
+  // within the configured window. Fail open on an unparseable timestamp so a
+  // format change on Meta's side never silently drops real traffic.
+  private isFresh(timestamp: string): boolean {
+    if (this.messageMaxAgeSeconds <= 0) return true;
+    const epochSeconds = Number(timestamp);
+    if (!Number.isFinite(epochSeconds) || epochSeconds <= 0) return true;
+    const nowSeconds = Date.now() / 1000;
+    return Math.abs(nowSeconds - epochSeconds) <= this.messageMaxAgeSeconds;
+  }
+
+  private async registerLockout(subjectHash: string, globalSubject: string): Promise<void> {
+    // Emit one lockout transition per sender/window. Without this secondary
+    // bucket, every message after the threshold would inflate health metrics
+    // and fan out another integration notification.
+    if (!(await this.consumeLimit("whatsapp.lockout-notify", subjectHash, 1))) return;
+    this.lockedOutSenders += 1;
+    // Only non-reversible references leave the process.
+    this.eventNotifier.notify({ type: "sender.locked_out", details: { senderHash: subjectHash } });
+    if (await this.consumeLimit("whatsapp.lockout-audit", globalSubject, 5)) {
+      await this.options.audit.record({
+        eventType: "whatsapp.lockout",
+        outcome: "denied",
+        details: { reason: "abuse_threshold_exceeded" }
+      });
+      logSafe(
+        this.options.logger,
+        "warn",
+        {},
+        "Locked out a WhatsApp sender after repeated unauthorized messages"
+      );
+    }
+  }
+
   private recoveredMessage(pending: PendingInboundMessage, identity: AuthorizedUserIdentity): QueuedMessage {
     return {
       storedId: pending.id,
@@ -265,6 +329,22 @@ export class MessageProcessor {
     const senderPhone = this.options.identifiers.hash(phoneForHash, "sender-phone");
     const rateSubject = this.options.identifiers.hash(phoneForHash, "rate-limit-subject").hash;
     const globalSubject = this.options.identifiers.hash("global", "rate-limit-global").hash;
+
+    // Replay hardening: a captured webhook re-delivered later carries its
+    // original Meta timestamp. Drop anything outside the freshness window
+    // before spending any rate-limit budget or touching storage.
+    if (!this.isFresh(incoming.timestamp)) {
+      if (await this.consumeLimit("whatsapp.security-audit", globalSubject, 5)) {
+        await this.options.audit.record({
+          eventType: "whatsapp.replay_rejected",
+          outcome: "denied",
+          details: { reason: "stale_timestamp" }
+        });
+        logSafe(this.options.logger, "warn", {}, "Dropped a WhatsApp webhook message with a stale timestamp");
+      }
+      return { result: "stale" };
+    }
+
     const ingressAllowed = await this.consumeLimit(
       "whatsapp.ingress-global",
       globalSubject,
@@ -279,6 +359,13 @@ export class MessageProcessor {
     const user = normalizedPhone ? await this.options.users.findActiveByPhone(normalizedPhone) : null;
 
     if (!user || !normalizedPhone) {
+      // Repeated unauthorized traffic from one sender within the window trips a
+      // lockout: the sender is silently ignored (no reply, no engagement) and
+      // the event is escalated so operators/integrations can react to probing.
+      if (!(await this.consumeLimit("whatsapp.abuse-sender", rateSubject, this.abuseLockoutThreshold))) {
+        await this.registerLockout(rateSubject, globalSubject);
+        return { result: "unauthorized" };
+      }
       if (await this.consumeLimit("whatsapp.security-audit", globalSubject, 5)) {
         await this.options.audit.record({
           eventType: "whatsapp.authorization",
@@ -577,6 +664,10 @@ export class MessageProcessor {
     if (error instanceof WhatsAppApiError && error.permanent) {
       this.consecutivePermanentSendFailures += 1;
       this.lastMetaErrorCode = metaErrorCode;
+      this.eventNotifier.notify({
+        type: "send.permanent_failure",
+        details: { ...(metaErrorCode !== null ? { metaErrorCode } : {}) }
+      });
     }
     const markUndeliverable = this.options.messages.markInboundUndeliverable;
     if (permanent && markUndeliverable) {

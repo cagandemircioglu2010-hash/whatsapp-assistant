@@ -33,6 +33,9 @@ function config(): AppConfig {
     ingressGlobalRateLimitPerMinute: 600,
     dataLifecycleIntervalMinutes: 60,
     messageWorkerConcurrency: 4,
+    abuseLockoutThresholdPerMinute: 10,
+    webhookMessageMaxAgeSeconds: 0,
+    integration: { timeoutMs: 4000 },
     whatsapp: { enabled: false, graphApiVersion: "v25.0", requireSignature: true, debugLogging: false },
     llm: {
       enabled: false,

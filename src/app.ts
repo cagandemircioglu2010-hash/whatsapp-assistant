@@ -3,7 +3,9 @@ import type { Pool } from "pg";
 import type { Logger } from "pino";
 import { AuthorizationService } from "./auth/authorization.service.js";
 import { FallbackAssistantResponder } from "./assistant/fallback-responder.js";
+import { BotCommandRouter } from "./assistant/bot-command-router.js";
 import type { AssistantResponder } from "./assistant/types.js";
+import { NoopEventNotifier, SignedHttpEventNotifier, type EventNotifier } from "./integrations/event-notifier.js";
 import { PermissionRepository } from "./auth/permission.repository.js";
 import { UserRepository } from "./auth/user.repository.js";
 import type { AppConfig } from "./config/env.js";
@@ -143,6 +145,30 @@ export async function buildApp(dependencies: AppDependencies) {
     responder = new FallbackAssistantResponder(llmAssistant, router, dependencies.logger);
   }
 
+  // Self-service bot commands (privacy notice, right-to-erasure, access
+  // request) are handled ahead of the report/LLM responder; anything else
+  // falls through unchanged.
+  responder = new BotCommandRouter(responder, {
+    audit,
+    logger: dependencies.logger,
+    defaultLocale: dependencies.config.assistantLocale
+  });
+
+  // Optional signed outbound notifier for operational events. Disabled (noop)
+  // unless an integration URL + secret are configured.
+  const eventNotifier: EventNotifier =
+    dependencies.config.integration.webhookUrl && dependencies.config.integration.webhookSecret
+      ? new SignedHttpEventNotifier({
+          url: dependencies.config.integration.webhookUrl,
+          secret: dependencies.config.integration.webhookSecret,
+          timeoutMs: dependencies.config.integration.timeoutMs,
+          logger: dependencies.logger
+        })
+      : new NoopEventNotifier();
+  if (eventNotifier instanceof SignedHttpEventNotifier) {
+    shutdownTasks.push(() => eventNotifier.drain());
+  }
+
   let whatsappProcessor: MessageProcessor | null = null;
   if (dependencies.config.whatsapp.enabled) {
     const sender = new WhatsAppClient({
@@ -164,7 +190,10 @@ export async function buildApp(dependencies: AppDependencies) {
       ingressSenderRateLimitPerMinute: dependencies.config.ingressSenderRateLimitPerMinute,
       ingressGlobalRateLimitPerMinute: dependencies.config.ingressGlobalRateLimitPerMinute,
       workerConcurrency: dependencies.config.messageWorkerConcurrency,
-      locale: dependencies.config.assistantLocale
+      locale: dependencies.config.assistantLocale,
+      abuseLockoutThreshold: dependencies.config.abuseLockoutThresholdPerMinute,
+      messageMaxAgeSeconds: dependencies.config.webhookMessageMaxAgeSeconds,
+      eventNotifier
     });
     whatsappProcessor = processor;
 
@@ -319,6 +348,7 @@ export async function buildApp(dependencies: AppDependencies) {
       // Reported but never gates `healthy`: restarting the service cannot fix
       // a broken Meta configuration, so this must not trip restart loops.
       const delivery = whatsappProcessor?.deliveryHealth() ?? null;
+      const security = whatsappProcessor?.securityHealth() ?? null;
       return reply.code(healthy ? 200 : 503).send({
         status: healthy ? "ok" : "unhealthy",
         checks: {
@@ -334,6 +364,9 @@ export async function buildApp(dependencies: AppDependencies) {
                   ? { lastMetaErrorCode: delivery.lastMetaErrorCode }
                   : {})
               }
+            : {}),
+          ...(security && security.lockedOutSenders > 0
+            ? { lockedOutSenders: security.lockedOutSenders }
             : {})
         }
       });

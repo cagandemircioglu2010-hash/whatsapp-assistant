@@ -106,6 +106,26 @@ describe("application configuration", () => {
     expect(loadConfig({ ...baseEnvironment, OPS_TOKEN: "o".repeat(32) }).opsToken).toBe("o".repeat(32));
   });
 
+  it("requires a complete HTTP(S) integration webhook configuration", () => {
+    expect(() =>
+      loadConfig({ ...baseEnvironment, INTEGRATION_WEBHOOK_URL: "https://ops.example/hook" })
+    ).toThrow("INTEGRATION_WEBHOOK_SECRET");
+    expect(() =>
+      loadConfig({
+        ...baseEnvironment,
+        INTEGRATION_WEBHOOK_URL: "ftp://ops.example/hook",
+        INTEGRATION_WEBHOOK_SECRET: "i".repeat(32)
+      })
+    ).toThrow("HTTP or HTTPS");
+    expect(
+      loadConfig({
+        ...baseEnvironment,
+        INTEGRATION_WEBHOOK_URL: "https://ops.example/hook",
+        INTEGRATION_WEBHOOK_SECRET: "i".repeat(32)
+      }).integration
+    ).toMatchObject({ webhookUrl: "https://ops.example/hook", timeoutMs: 4000 });
+  });
+
   it("rejects non-PostgreSQL connection URLs", () => {
     expect(() => loadConfig({ ...baseEnvironment, DATABASE_URL: "https://example.com/database" })).toThrow(
       "PostgreSQL"
