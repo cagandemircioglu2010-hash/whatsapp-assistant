@@ -68,6 +68,7 @@ const schema = z
     SAFETY_IDENTIFIER_SECRET: z.string().min(32).optional(),
     DEFAULT_PHONE_COUNTRY: z.string().length(2).default("TR"),
     COMPANY_TIMEZONE: z.string().default("Europe/Istanbul"),
+    ASSISTANT_LOCALE: z.enum(["tr", "en"]).default("tr"),
     DATA_ENCRYPTION_ACTIVE_KEY_ID: z.string().optional(),
     DATA_ENCRYPTION_KEYS: z.string().optional(),
     DATA_ENCRYPTION_KEYS_FILE: z.string().min(1).optional(),
@@ -80,6 +81,11 @@ const schema = z
     INGRESS_GLOBAL_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(10).max(10000).default(600),
     DATA_LIFECYCLE_INTERVAL_MINUTES: z.coerce.number().int().min(5).max(1440).default(60),
     MESSAGE_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(4),
+    ABUSE_LOCKOUT_THRESHOLD_PER_MINUTE: z.coerce.number().int().min(1).max(1000).default(10),
+    WEBHOOK_MESSAGE_MAX_AGE_SECONDS: z.coerce.number().int().min(0).max(86_400).default(0),
+    INTEGRATION_WEBHOOK_URL: z.string().url().optional(),
+    INTEGRATION_WEBHOOK_SECRET: z.string().min(16).optional(),
+    INTEGRATION_WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(500).max(30_000).default(4_000),
     WHATSAPP_ENABLED: booleanFromString,
     WHATSAPP_VERIFY_TOKEN: z.string().optional(),
     WHATSAPP_ACCESS_TOKEN: z.string().optional(),
@@ -382,6 +388,30 @@ const schema = z
       }
     }
 
+    const integrationPair = Boolean(env.INTEGRATION_WEBHOOK_URL) === Boolean(env.INTEGRATION_WEBHOOK_SECRET);
+    if (!integrationPair) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["INTEGRATION_WEBHOOK_SECRET"],
+        message: "INTEGRATION_WEBHOOK_URL and INTEGRATION_WEBHOOK_SECRET must be set together"
+      });
+    }
+    if (env.INTEGRATION_WEBHOOK_URL) {
+      let protocol: string | null = null;
+      try {
+        protocol = new URL(env.INTEGRATION_WEBHOOK_URL).protocol;
+      } catch {
+        protocol = null;
+      }
+      if (env.NODE_ENV === "production" && protocol !== "https:") {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["INTEGRATION_WEBHOOK_URL"],
+          message: "INTEGRATION_WEBHOOK_URL must use HTTPS in production"
+        });
+      }
+    }
+
     const selectedLlmApiKey = env.LLM_PROVIDER === "gemini" ? env.GEMINI_API_KEY : env.OPENAI_API_KEY;
     const selectedLlmApiKeyName = env.LLM_PROVIDER === "gemini" ? "GEMINI_API_KEY" : "OPENAI_API_KEY";
     if (env.LLM_ENABLED && !selectedLlmApiKey) {
@@ -433,6 +463,7 @@ export type AppConfig = {
   safetyIdentifierSecret?: string;
   defaultPhoneCountry: CountryCode;
   companyTimezone: string;
+  assistantLocale: "tr" | "en";
   dataEncryption: DataEncryptionConfig | null;
   messageRetentionDays: number;
   messageRecordRetentionDays: number;
@@ -443,6 +474,13 @@ export type AppConfig = {
   ingressGlobalRateLimitPerMinute: number;
   dataLifecycleIntervalMinutes: number;
   messageWorkerConcurrency: number;
+  abuseLockoutThresholdPerMinute: number;
+  webhookMessageMaxAgeSeconds: number;
+  integration: {
+    webhookUrl?: string;
+    webhookSecret?: string;
+    timeoutMs: number;
+  };
   whatsapp: {
     enabled: boolean;
     verifyToken?: string;
@@ -499,6 +537,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
       : {}),
     defaultPhoneCountry: env.DEFAULT_PHONE_COUNTRY.toUpperCase() as CountryCode,
     companyTimezone: env.COMPANY_TIMEZONE,
+    assistantLocale: env.ASSISTANT_LOCALE,
     dataEncryption,
     messageRetentionDays: env.MESSAGE_RETENTION_DAYS,
     messageRecordRetentionDays: env.MESSAGE_RECORD_RETENTION_DAYS,
@@ -509,6 +548,13 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     ingressGlobalRateLimitPerMinute: env.INGRESS_GLOBAL_RATE_LIMIT_PER_MINUTE,
     dataLifecycleIntervalMinutes: env.DATA_LIFECYCLE_INTERVAL_MINUTES,
     messageWorkerConcurrency: env.MESSAGE_WORKER_CONCURRENCY,
+    abuseLockoutThresholdPerMinute: env.ABUSE_LOCKOUT_THRESHOLD_PER_MINUTE,
+    webhookMessageMaxAgeSeconds: env.WEBHOOK_MESSAGE_MAX_AGE_SECONDS,
+    integration: {
+      ...(env.INTEGRATION_WEBHOOK_URL ? { webhookUrl: env.INTEGRATION_WEBHOOK_URL } : {}),
+      ...(env.INTEGRATION_WEBHOOK_SECRET ? { webhookSecret: env.INTEGRATION_WEBHOOK_SECRET } : {}),
+      timeoutMs: env.INTEGRATION_WEBHOOK_TIMEOUT_MS
+    },
     whatsapp: {
       enabled: env.WHATSAPP_ENABLED,
       ...(env.WHATSAPP_VERIFY_TOKEN ? { verifyToken: env.WHATSAPP_VERIFY_TOKEN } : {}),

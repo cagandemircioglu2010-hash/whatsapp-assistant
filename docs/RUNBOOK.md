@@ -156,7 +156,61 @@ webhooks, and asserts replies, permanent-failure handling (131030), retry
 behavior, and read receipts. Use `npm run mock:meta` to run the fake Graph API
 standalone and point a locally running service at it.
 
-## 8. Stress / health testing
+## 8. Day-2 operations
+
+- `npm run ops:status` — one-shot overview from the database: schema state,
+  whitelist size, queue depth (pending / stuck / delivery-unknown /
+  undeliverable), 24h traffic, and failure counts. Exit code 1 when something
+  needs attention, so it can drive a cron alert.
+- `ASSISTANT_LOCALE` (tr default / en) controls the language of the notices
+  the bot sends on its own: unsupported-message-type replies, "slow down"
+  rate-limit feedback, and the best-effort "can't answer right now" apology
+  sent when processing fails before the reply (never when the send layer
+  itself is broken).
+- CI runs the mock-Meta end-to-end bridge test on every push/PR, so a
+  regression in the webhook → assistant → send path fails the build before it
+  reaches Render.
+- `GET /health/whatsapp` with header `x-ops-token: <WHATSAPP_VERIFY_TOKEN>` —
+  live Meta configuration probe: verified name, quality rating, token expiry
+  in hours, and current delivery health. 503 with the Meta error code and
+  hint when the configuration is broken; wire it to an uptime monitor.
+- `npm run db:export-audit -- --days 90 --format csv` — compliance export of
+  the audit log (metadata only, no message content).
+- Users can send `menü` (or `help`/`?`) for a permission-aware report menu
+  with numeric shortcuts (`1` = sales, `2` = projects, `3` = overdue tasks).
+- Per-user notice language: `npm run db:add-user -- ... --locale en`
+  overrides `ASSISTANT_LOCALE` for that user.
+- With the LLM enabled, the assistant now receives the last few decrypted
+  exchanges as context, so follow-up questions ("peki geciken görevler?")
+  resolve naturally. History respects retention: purged content is skipped.
+- `npm run db:whitelist-batch -- --file users.json` — onboard many users in
+  one atomic transaction (all rows validated first; the error names the bad
+  row). Same fields as `db:add-user`.
+- `npm run db:list-access-requests [-- --days 30 --full]` — the access and
+  right-to-erasure requests users raised from WhatsApp ("erişim istiyorum" /
+  "verilerimi sil"). The running service only writes these as audit events; an
+  operator fulfils them with `db:add-user` / `db:erase-user-data`.
+
+## 8a. Abuse lockout, replay protection, and integration events
+
+- **Sender lockout**: more than `ABUSE_LOCKOUT_THRESHOLD_PER_MINUTE` (default
+  10) unauthorized messages from one sender within a minute trips a silent
+  lockout for the rest of the window — no reply, audited as `whatsapp.lockout`,
+  counted as `lockedOutSenders` in `GET /health`. Legitimate whitelisted users
+  are never affected.
+- **Replay protection**: set `WEBHOOK_MESSAGE_MAX_AGE_SECONDS` (e.g. 300) to
+  reject inbound webhook messages whose Meta timestamp is outside the window,
+  on top of the existing signature check and message-id dedup. `0` (default)
+  disables it. Rejected messages are audited as `whatsapp.replay_rejected`.
+- **Integration webhook**: set `INTEGRATION_WEBHOOK_URL` +
+  `INTEGRATION_WEBHOOK_SECRET` to forward operational events (`sender.locked_out`,
+  `send.permanent_failure`) as HMAC-signed POSTs. The receiver recomputes
+  `sha256=HMAC(secret, body)` and compares against `x-assistant-signature`;
+  `x-assistant-timestamp` is inside the signed body for freshness. Payloads
+  carry only non-reversible references (hashes, Meta error codes) — never
+  message content. Disabled by default; delivery never blocks the pipeline.
+
+## 9. Stress / health testing
 
 - `npm run test:stress` — worker queue saturation, rate-limit behavior.
 - `npm run check` — typecheck + full test suite with coverage + build.

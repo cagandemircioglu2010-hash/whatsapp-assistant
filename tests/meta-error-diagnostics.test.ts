@@ -293,6 +293,146 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("menu and numbered shortcuts", () => {
+  const router = (allowed: Set<string>) =>
+    new ReportCommandRouter(
+      reports,
+      new AuthorizationService({ has: async (_userId, resource) => allowed.has(resource) }),
+      "Europe/Istanbul"
+    );
+  const user = { id: "user-1", department: "Sales", role: "employee" };
+
+  it("lists only the reports the user is permitted to read", async () => {
+    const response = await router(new Set(["company.sales", "company.tasks"])).handle(user, "menü", {
+      messageId: "m1"
+    });
+    expect(response.outcome).toBe("success");
+    expect(response.text).toContain("1. Satış özeti");
+    expect(response.text).toContain("3. Geciken görevler");
+    expect(response.text).not.toContain("Aktif projeler");
+  });
+
+  it("tells a permissionless user to contact an admin", async () => {
+    const response = await router(new Set()).handle(user, "menu", { messageId: "m2" });
+    expect(response.outcome).toBe("denied");
+  });
+
+  it("maps numeric shortcuts onto the report commands", async () => {
+    const response = await router(new Set(["company.sales"])).handle(user, "1", { messageId: "m3" });
+    expect(response.outcome).toBe("success");
+    expect(response.resource).toBe("company.sales");
+  });
+});
+
+describe("conversation history context", () => {
+  it("passes recent decrypted exchanges to the responder", async () => {
+    class HistoryMessages extends MemoryMessages {
+      async recentConversation() {
+        return [
+          { direction: "inbound" as const, content: "satış özeti" },
+          { direction: "outbound" as const, content: "Son 7 gün satış özeti: ..." }
+        ];
+      }
+    }
+    const seenContexts: unknown[] = [];
+    const sender: WhatsAppSender = {
+      sendText: async () => ({ externalMessageId: "wamid.out" })
+    };
+    const processor = new MessageProcessor({
+      users,
+      messages: new HistoryMessages(),
+      audit: new MemoryAudit(),
+      sender,
+      router: {
+        handle: async (_user, _text, context) => {
+          seenContexts.push(context);
+          return { text: "tamam", resource: null, resources: [], outcome: "success" as const };
+        }
+      },
+      logger: createLogger("silent"),
+      identifiers: new VersionedHmac(legacyHmacKeyRing("x".repeat(32))),
+      rateLimits: new InMemoryRateLimitStore(),
+      defaultCountry: "TR",
+      rateLimitPerMinute: 20,
+      ingressSenderRateLimitPerMinute: 1_000,
+      ingressGlobalRateLimitPerMinute: 10_000
+    });
+
+    await processor.process(incomingText);
+    expect(seenContexts[0]).toMatchObject({
+      history: [
+        { direction: "inbound", text: "satış özeti" },
+        { direction: "outbound", text: "Son 7 gün satış özeti: ..." }
+      ]
+    });
+  });
+
+  it("degrades to a context-free answer when history loading fails", async () => {
+    class BrokenHistoryMessages extends MemoryMessages {
+      async recentConversation(): Promise<never> {
+        throw new Error("history query failed");
+      }
+    }
+    const sender: WhatsAppSender = { sendText: async () => ({ externalMessageId: "wamid.out" }) };
+    const processor = buildProcessorWithMessages(new BrokenHistoryMessages(), sender);
+    await expect(processor.process(incomingText)).resolves.toBe("processed");
+  });
+});
+
+describe("per-user locale", () => {
+  it("prefers the user's locale over the service default for notices", async () => {
+    const sent: string[] = [];
+    const sender: WhatsAppSender = {
+      sendText: async (_to, text) => {
+        sent.push(text);
+        return { externalMessageId: "wamid.out" };
+      }
+    };
+    const processor = new MessageProcessor({
+      users: {
+        findActiveByPhone: async () => ({
+          id: "user-en",
+          department: "Sales",
+          role: "employee",
+          locale: "en" as const
+        })
+      },
+      messages: new MemoryMessages(),
+      audit: new MemoryAudit(),
+      sender,
+      router: new ReportCommandRouter(reports, new AuthorizationService(permissions), "Europe/Istanbul"),
+      logger: createLogger("silent"),
+      identifiers: new VersionedHmac(legacyHmacKeyRing("x".repeat(32))),
+      rateLimits: new InMemoryRateLimitStore(),
+      defaultCountry: "TR",
+      rateLimitPerMinute: 20,
+      ingressSenderRateLimitPerMinute: 1_000,
+      ingressGlobalRateLimitPerMinute: 10_000,
+      locale: "tr"
+    });
+
+    await processor.process({ ...incomingText, type: "image", text: "[image]" });
+    expect(sent[0]).toContain("text messages");
+  });
+});
+
+function buildProcessorWithMessages(messages: MemoryMessages, sender: WhatsAppSender) {
+  return new MessageProcessor({
+    users,
+    messages,
+    audit: new MemoryAudit(),
+    sender,
+    router: new ReportCommandRouter(reports, new AuthorizationService(permissions), "Europe/Istanbul"),
+    logger: createLogger("silent"),
+    identifiers: new VersionedHmac(legacyHmacKeyRing("x".repeat(32))),
+    rateLimits: new InMemoryRateLimitStore(),
+    defaultCountry: "TR",
+    rateLimitPerMinute: 20,
+    ingressSenderRateLimitPerMinute: 1_000,
+    ingressGlobalRateLimitPerMinute: 10_000
+  });
+}
+
 describe("permanent send failure handling", () => {
   it("marks the inbound message undeliverable and audits the Meta code", async () => {
     const messages = new MemoryMessages();
@@ -365,6 +505,105 @@ describe("permanent send failure handling", () => {
     expect(result).toBe("processed");
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain("text");
+  });
+
+  it("sends a localized notice when the user is rate limited, once per window", async () => {
+    const messages = new MemoryMessages();
+    const audit = new MemoryAudit();
+    const sent: string[] = [];
+    const sender: WhatsAppSender = {
+      sendText: async (_to, text) => {
+        sent.push(text);
+        return { externalMessageId: `wamid.out.${sent.length}` };
+      }
+    };
+    const processor = new MessageProcessor({
+      users,
+      messages,
+      audit,
+      sender,
+      router: new ReportCommandRouter(reports, new AuthorizationService(permissions), "Europe/Istanbul"),
+      logger: createLogger("silent"),
+      identifiers: new VersionedHmac(legacyHmacKeyRing("x".repeat(32))),
+      rateLimits: new InMemoryRateLimitStore(),
+      defaultCountry: "TR",
+      rateLimitPerMinute: 1,
+      ingressSenderRateLimitPerMinute: 1_000,
+      ingressGlobalRateLimitPerMinute: 10_000,
+      locale: "tr"
+    });
+
+    await processor.process(incomingText);
+    const second = await processor.process({ ...incomingText, externalMessageId: "wamid.in.2" });
+    const third = await processor.process({ ...incomingText, externalMessageId: "wamid.in.3" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(second).toBe("rate_limited");
+    expect(third).toBe("rate_limited");
+    const notices = sent.filter((text) => text.includes("bir dakika"));
+    expect(notices).toHaveLength(1);
+  });
+
+  it("apologizes in the configured locale when processing fails before the send", async () => {
+    const messages = new MemoryMessages();
+    const audit = new MemoryAudit();
+    const sent: string[] = [];
+    const sender: WhatsAppSender = {
+      sendText: async (_to, text) => {
+        sent.push(text);
+        return { externalMessageId: "wamid.out" };
+      }
+    };
+    const processor = new MessageProcessor({
+      users,
+      messages,
+      audit,
+      sender,
+      router: {
+        handle: async () => {
+          throw new Error("assistant exploded");
+        }
+      },
+      logger: createLogger("silent"),
+      identifiers: new VersionedHmac(legacyHmacKeyRing("x".repeat(32))),
+      rateLimits: new InMemoryRateLimitStore(),
+      defaultCountry: "TR",
+      rateLimitPerMinute: 20,
+      ingressSenderRateLimitPerMinute: 1_000,
+      ingressGlobalRateLimitPerMinute: 10_000,
+      locale: "tr"
+    });
+
+    const result = await processor.process(incomingText);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(result).toBe("failed");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("cevap veremiyorum");
+  });
+
+  it("does not apologize when the send layer itself is broken", async () => {
+    const messages = new MemoryMessages();
+    const audit = new MemoryAudit();
+    const attempts: string[] = [];
+    const sender: WhatsAppSender = {
+      sendText: async (_to, text) => {
+        attempts.push(text);
+        throw new WhatsAppApiError({
+          httpStatus: 400,
+          metaErrorCode: 131030,
+          metaErrorSubcode: null,
+          fbtraceId: null,
+          apiMessage: null,
+          hint: metaErrorHint(131030, 400),
+          classification: "permanent"
+        });
+      }
+    };
+    const processor = buildProcessor(messages, audit, sender);
+    await processor.process(incomingText);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // Only the original reply attempt; no apology echo into a dead send path.
+    expect(attempts).toHaveLength(1);
   });
 
   it("sends a read receipt without letting receipt failures break processing", async () => {

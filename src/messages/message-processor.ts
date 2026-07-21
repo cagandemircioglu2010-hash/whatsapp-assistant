@@ -1,6 +1,7 @@
 import type { CountryCode } from "libphonenumber-js";
 import type { Logger } from "pino";
-import type { AssistantResponder } from "../assistant/types.js";
+import { systemMessage, type AssistantLocale } from "../assistant/system-messages.js";
+import type { AssistantResponder, ConversationTurn } from "../assistant/types.js";
 import type {
   AuthorizedUserIdentity,
   UserLookup,
@@ -17,6 +18,7 @@ import {
   WhatsAppDeliveryUncertainError
 } from "../whatsapp/client.js";
 import { metaErrorHint } from "../whatsapp/meta-errors.js";
+import { NoopEventNotifier, type EventNotifier } from "../integrations/event-notifier.js";
 import type {
   IncomingWhatsAppMessage,
   WhatsAppMessageStatus,
@@ -24,6 +26,7 @@ import type {
 } from "../whatsapp/types.js";
 import type { AuditStore } from "./audit.repository.js";
 import type {
+  ConversationHistoryStore,
   MessageStore,
   MessageStatusStore,
   OutboundDeliveryStore,
@@ -38,6 +41,7 @@ export type ProcessingResult =
   | "rate_limited"
   | "delivery_unknown"
   | "duplicate"
+  | "stale"
   | "failed";
 
 type MessageProcessorOptions = {
@@ -45,7 +49,8 @@ type MessageProcessorOptions = {
   messages: MessageStore &
     Partial<PendingMessageStore> &
     Partial<OutboundDeliveryStore> &
-    Partial<MessageStatusStore>;
+    Partial<MessageStatusStore> &
+    Partial<ConversationHistoryStore>;
   audit: AuditStore;
   router: AssistantResponder;
   sender: WhatsAppSender;
@@ -57,6 +62,16 @@ type MessageProcessorOptions = {
   ingressSenderRateLimitPerMinute?: number;
   ingressGlobalRateLimitPerMinute?: number;
   workerConcurrency?: number;
+  locale?: AssistantLocale;
+  // Repeated unauthorized inbound from one sender within a minute past this
+  // count trips a lockout for the remainder of the window. Defaults to 10.
+  abuseLockoutThreshold?: number;
+  // Inbound webhook messages whose Meta timestamp is older or further in the
+  // future than this many seconds are rejected as stale (replay hardening).
+  // 0 disables the check. Defaults to 0 (off) for backward compatibility.
+  messageMaxAgeSeconds?: number;
+  // Optional sink for operational events (lockouts, permanent send failures).
+  eventNotifier?: EventNotifier;
 };
 
 type QueuedMessage = {
@@ -73,9 +88,6 @@ type QueuedMessage = {
 // else (media, contacts, locations, ...) gets a fixed notice instead of an
 // LLM round-trip over a "[image]" placeholder.
 const SUPPORTED_TEXT_TYPES = new Set(["text", "button", "interactive"]);
-
-const UNSUPPORTED_TYPE_REPLY =
-  "I can only read text messages for now. Please send your request as text.";
 
 type QueuedWork = {
   message: QueuedMessage;
@@ -102,12 +114,27 @@ export class MessageProcessor {
   private pumpScheduled = false;
   private consecutivePermanentSendFailures = 0;
   private lastMetaErrorCode: number | null = null;
+  private lockedOutSenders = 0;
+  private readonly locale: AssistantLocale;
+  private readonly abuseLockoutThreshold: number;
+  private readonly messageMaxAgeSeconds: number;
+  private readonly eventNotifier: EventNotifier;
 
   constructor(private readonly options: MessageProcessorOptions) {
     this.userRateLimit = options.rateLimitPerMinute ?? 20;
     this.ingressSenderRateLimit = options.ingressSenderRateLimitPerMinute ?? 10;
     this.ingressGlobalRateLimit = options.ingressGlobalRateLimitPerMinute ?? 600;
     this.workerConcurrency = options.workerConcurrency ?? 4;
+    this.locale = options.locale ?? "en";
+    this.abuseLockoutThreshold = options.abuseLockoutThreshold ?? 10;
+    this.messageMaxAgeSeconds = options.messageMaxAgeSeconds ?? 0;
+    this.eventNotifier = options.eventNotifier ?? new NoopEventNotifier();
+    if (!Number.isInteger(this.abuseLockoutThreshold) || this.abuseLockoutThreshold < 1) {
+      throw new Error("Abuse lockout threshold must be a positive integer");
+    }
+    if (!Number.isInteger(this.messageMaxAgeSeconds) || this.messageMaxAgeSeconds < 0) {
+      throw new Error("Message max age must be a non-negative integer");
+    }
     if (!Number.isInteger(this.workerConcurrency) || this.workerConcurrency < 1 || this.workerConcurrency > 16) {
       throw new Error("Worker concurrency must be between 1 and 16");
     }
@@ -244,6 +271,42 @@ export class MessageProcessor {
     };
   }
 
+  // Running count of sender lockouts triggered since boot, for the /health
+  // endpoint and operational visibility.
+  securityHealth(): { lockedOutSenders: number } {
+    return { lockedOutSenders: this.lockedOutSenders };
+  }
+
+  // Fresh iff the check is enabled and the Meta timestamp (unix seconds) is
+  // within the configured window. Fail open on an unparseable timestamp so a
+  // format change on Meta's side never silently drops real traffic.
+  private isFresh(timestamp: string): boolean {
+    if (this.messageMaxAgeSeconds <= 0) return true;
+    const epochSeconds = Number(timestamp);
+    if (!Number.isFinite(epochSeconds) || epochSeconds <= 0) return true;
+    const nowSeconds = Date.now() / 1000;
+    return Math.abs(nowSeconds - epochSeconds) <= this.messageMaxAgeSeconds;
+  }
+
+  private async registerLockout(subjectHash: string, globalSubject: string): Promise<void> {
+    this.lockedOutSenders += 1;
+    // Only non-reversible references leave the process.
+    this.eventNotifier.notify({ type: "sender.locked_out", details: { senderHash: subjectHash } });
+    if (await this.consumeLimit("whatsapp.lockout-audit", globalSubject, 5)) {
+      await this.options.audit.record({
+        eventType: "whatsapp.lockout",
+        outcome: "denied",
+        details: { reason: "abuse_threshold_exceeded" }
+      });
+      logSafe(
+        this.options.logger,
+        "warn",
+        {},
+        "Locked out a WhatsApp sender after repeated unauthorized messages"
+      );
+    }
+  }
+
   private recoveredMessage(pending: PendingInboundMessage, identity: AuthorizedUserIdentity): QueuedMessage {
     return {
       storedId: pending.id,
@@ -262,6 +325,22 @@ export class MessageProcessor {
     const senderPhone = this.options.identifiers.hash(phoneForHash, "sender-phone");
     const rateSubject = this.options.identifiers.hash(phoneForHash, "rate-limit-subject").hash;
     const globalSubject = this.options.identifiers.hash("global", "rate-limit-global").hash;
+
+    // Replay hardening: a captured webhook re-delivered later carries its
+    // original Meta timestamp. Drop anything outside the freshness window
+    // before spending any rate-limit budget or touching storage.
+    if (!this.isFresh(incoming.timestamp)) {
+      if (await this.consumeLimit("whatsapp.security-audit", globalSubject, 5)) {
+        await this.options.audit.record({
+          eventType: "whatsapp.replay_rejected",
+          outcome: "denied",
+          details: { reason: "stale_timestamp" }
+        });
+        logSafe(this.options.logger, "warn", {}, "Dropped a WhatsApp webhook message with a stale timestamp");
+      }
+      return { result: "stale" };
+    }
+
     const ingressAllowed = await this.consumeLimit(
       "whatsapp.ingress-global",
       globalSubject,
@@ -276,6 +355,13 @@ export class MessageProcessor {
     const user = normalizedPhone ? await this.options.users.findActiveByPhone(normalizedPhone) : null;
 
     if (!user || !normalizedPhone) {
+      // Repeated unauthorized traffic from one sender within the window trips a
+      // lockout: the sender is silently ignored (no reply, no engagement) and
+      // the event is escalated so operators/integrations can react to probing.
+      if (!(await this.consumeLimit("whatsapp.abuse-sender", rateSubject, this.abuseLockoutThreshold))) {
+        await this.registerLockout(rateSubject, globalSubject);
+        return { result: "unauthorized" };
+      }
       if (await this.consumeLimit("whatsapp.security-audit", globalSubject, 5)) {
         await this.options.audit.record({
           eventType: "whatsapp.authorization",
@@ -372,6 +458,7 @@ export class MessageProcessor {
         { userId: queued.user.id, messageId: queued.storedId },
         "WhatsApp sender exceeded the per-user rate limit"
       );
+      void this.sendNoticeOncePerMinute(queued, "rateLimited", userRateSubject);
       return "rate_limited";
     }
 
@@ -381,13 +468,14 @@ export class MessageProcessor {
       const command =
         queued.messageType !== null && !SUPPORTED_TEXT_TYPES.has(queued.messageType)
           ? {
-              text: UNSUPPORTED_TYPE_REPLY,
+              text: systemMessage("unsupportedType", this.localeFor(queued.user)),
               resource: null,
               resources: [],
               outcome: "unsupported" as const
             }
           : await this.options.router.handle(queued.user, queued.text, {
-              messageId: queued.storedId
+              messageId: queued.storedId,
+              ...(await this.conversationHistory(queued))
             });
       await this.options.audit.record({
         userId: queued.user.id,
@@ -426,7 +514,71 @@ export class MessageProcessor {
       return "processed";
     } catch (error) {
       await this.markUnexpectedFailure(queued.storedId, queued.user.id, error);
+      // If the failure happened before/without a send attempt (LLM crash, DB
+      // error, ...) the user would otherwise face pure silence. A send-layer
+      // failure is excluded: the apology would fail identically.
+      if (!this.isSendLayerError(error)) {
+        const userRateSubject = this.options.identifiers.hash(queued.user.id, "rate-limit-user").hash;
+        void this.sendNoticeOncePerMinute(queued, "processingFailed", userRateSubject);
+      }
       return "failed";
+    }
+  }
+
+  private localeFor(user: AuthorizedUser): AssistantLocale {
+    return user.locale ?? this.locale;
+  }
+
+  // Best-effort short-term memory for the assistant; failures degrade to a
+  // context-free answer rather than blocking the reply.
+  private async conversationHistory(queued: QueuedMessage): Promise<{ history?: ConversationTurn[] }> {
+    const recent = this.options.messages.recentConversation;
+    if (!recent) return {};
+    try {
+      const entries = await recent.call(this.options.messages, queued.user.id, queued.storedId, 6);
+      if (entries.length === 0) return {};
+      return {
+        history: entries.map((entry) => ({
+          direction: entry.direction,
+          text: entry.content.slice(0, 1_000)
+        }))
+      };
+    } catch (error) {
+      logSafe(
+        this.options.logger,
+        "debug",
+        { error, userId: queued.user.id, messageId: queued.storedId },
+        "Conversation history could not be loaded"
+      );
+      return {};
+    }
+  }
+
+  private isSendLayerError(error: unknown): boolean {
+    return (
+      error instanceof WhatsAppApiError ||
+      error instanceof WhatsAppDeliveryUncertainError ||
+      isPermanentSendError(error)
+    );
+  }
+
+  // Best-effort user notice, capped at one per key per minute per user so a
+  // burst of failures or rate-limited spam cannot echo notice floods back.
+  private async sendNoticeOncePerMinute(
+    queued: QueuedMessage,
+    key: "rateLimited" | "processingFailed",
+    subjectHash: string
+  ): Promise<void> {
+    try {
+      if (!(await this.options.rateLimits.consume(`whatsapp.notice.${key}`, subjectHash, 1))) return;
+      await this.options.sender.sendText(queued.phoneE164, systemMessage(key, this.localeFor(queued.user)));
+    } catch (error) {
+      logSafe(
+        this.options.logger,
+        "debug",
+        { error, userId: queued.user.id, messageId: queued.storedId },
+        "Best-effort user notice could not be sent"
+      );
     }
   }
 
@@ -508,6 +660,10 @@ export class MessageProcessor {
     if (error instanceof WhatsAppApiError && error.permanent) {
       this.consecutivePermanentSendFailures += 1;
       this.lastMetaErrorCode = metaErrorCode;
+      this.eventNotifier.notify({
+        type: "send.permanent_failure",
+        details: { ...(metaErrorCode !== null ? { metaErrorCode } : {}) }
+      });
     }
     const markUndeliverable = this.options.messages.markInboundUndeliverable;
     if (permanent && markUndeliverable) {

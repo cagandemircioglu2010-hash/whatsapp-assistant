@@ -1,7 +1,16 @@
 import type { AuthorizedUser } from "../auth/types.js";
 
+export type ConversationTurn = {
+  direction: "inbound" | "outbound";
+  text: string;
+};
+
 export type AssistantContext = {
   messageId: string;
+  // Recent decrypted exchanges (oldest first), so the LLM can resolve
+  // follow-ups like "peki geciken görevler?". Absent when history is
+  // unavailable (recovery path, retention already purged, plain router).
+  history?: ConversationTurn[];
 };
 
 export type AssistantResponse = {

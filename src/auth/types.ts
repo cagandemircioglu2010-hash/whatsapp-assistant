@@ -2,6 +2,8 @@ export type AuthorizedUser = {
   id: string;
   department: string | null;
   role: string;
+  // Preferred notice language; absent/null falls back to ASSISTANT_LOCALE.
+  locale?: "tr" | "en" | null;
 };
 
 export type PermissionAction = "read" | "write" | "approve";
