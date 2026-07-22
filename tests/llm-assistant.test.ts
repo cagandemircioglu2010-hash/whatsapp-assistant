@@ -262,6 +262,44 @@ describe("LLM company assistant", () => {
     const requestText = JSON.stringify(gateway.requests[0]?.inputItems);
     expect(requestText).toContain("Geçmiş satış sorum");
     expect(requestText).not.toContain("GİZLİ ESKİ SATIŞ");
+    expect(requestText).toContain("eski soruları yeniden yanıtlama");
+    expect(requestText).toContain("Yeni görev yalnızca bir sonraki kullanıcı iletisidir");
+    expect(gateway.requests[0]?.instructions).toContain("Yalnızca en son kullanıcı iletisindeki isteği yanıtla");
+    expect(gateway.requests[0]?.instructions).toContain("geçmişi yalnızca o iletideki eksik göndergeleri çözmek için kullan");
+  });
+
+  it("marks an older unanswered prompt as context-only in hybrid mode", async () => {
+    const gateway = new DirectAnswerGateway("42");
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions: new FakeSessionFactory(),
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "latest-only-user", department: null, role: "employee" },
+      "13 ile 29'un toplamı nedir? Yalnızca sonucu yaz.",
+      {
+        messageId: "message-latest-only",
+        history: [
+          { direction: "inbound", text: "7 ile 8'in toplamı nedir?" },
+          { direction: "outbound", text: "Geçici bir hata oluştu." }
+        ]
+      }
+    );
+
+    expect(result.text).toBe("42");
+    expect(gateway.requests[0]?.inputItems).toHaveLength(2);
+    expect(JSON.stringify(gateway.requests[0]?.inputItems[0])).toContain("eski soruları yeniden yanıtlama");
+    expect(JSON.stringify(gateway.requests[0]?.inputItems[0])).toContain("7 ile 8'in toplamı nedir?");
+    expect(JSON.stringify(gateway.requests[0]?.inputItems[0])).not.toContain("Geçici bir hata oluştu");
+    expect(gateway.requests[0]?.inputItems.at(-1)).toEqual({
+      role: "user",
+      content: [{ type: "input_text", text: "13 ile 29'un toplamı nedir? Yalnızca sonucu yaz." }]
+    });
   });
 
   it("bounds and sanitizes hybrid input before it reaches the provider", async () => {
