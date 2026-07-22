@@ -88,6 +88,7 @@ const values: Array<[key: string, value: string, renderValue?: string | null]> =
   ["REQUIRE_WHATSAPP_SIGNATURE", "true"],
   ["WHATSAPP_DEBUG_LOGGING", "false"],
   ["LLM_ENABLED", "false", "true"],
+  ["LLM_GENERAL_CHAT_ENABLED", "false"],
   ["LLM_PROVIDER", "gemini"],
   ["GEMINI_API_KEY", "", "<aistudio.google.com API key>"],
   ["GEMINI_MODEL", "gemini-3.5-flash"],

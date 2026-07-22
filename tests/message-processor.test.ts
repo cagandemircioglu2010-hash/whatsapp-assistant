@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AuthorizationService } from "../src/auth/authorization.service.js";
+import type { AssistantResponder } from "../src/assistant/types.js";
 import type { PermissionLookup } from "../src/auth/permission.repository.js";
 import type { UserLookup } from "../src/auth/user.repository.js";
 import { createLogger } from "../src/logging/logger.js";
@@ -65,14 +66,17 @@ function processor(
   messages: MemoryMessages,
   audit: MemoryAudit,
   sender: WhatsAppSender,
-  rateLimitPerMinute = 20
+  rateLimitPerMinute = 20,
+  router?: AssistantResponder
 ) {
   return new MessageProcessor({
     users,
     messages,
     audit,
     sender,
-    router: new ReportCommandRouter(reports, new AuthorizationService(permissions), "Europe/Istanbul"),
+    router:
+      router ??
+      new ReportCommandRouter(reports, new AuthorizationService(permissions), "Europe/Istanbul"),
     logger: createLogger("silent"),
     identifiers: new VersionedHmac(legacyHmacKeyRing("x".repeat(32))),
     rateLimits: new InMemoryRateLimitStore(),
@@ -127,6 +131,40 @@ describe("message processor", () => {
     expect(messages.outbound[0]?.content).toContain("satış");
     expect(messages.statuses).toEqual(["processed"]);
     expect(sender.calls).toHaveLength(1);
+  });
+
+  it("audits general conversation separately from company report requests", async () => {
+    const messages = new MemoryMessages();
+    const audit = new MemoryAudit();
+    const sender = new MemorySender();
+    const generalRouter: AssistantResponder = {
+      handle: async () => ({
+        text: "15",
+        resource: null,
+        resources: [],
+        outcome: "success",
+        kind: "conversation"
+      })
+    };
+    const users: UserLookup = {
+      findActiveByPhone: async () => ({
+        id: "general-user",
+        department: null,
+        role: "employee"
+      })
+    };
+
+    const result = await processor(users, messages, audit, sender, 20, generalRouter).process({
+      externalMessageId: "wamid.general",
+      from: "905551234567",
+      type: "text",
+      text: "7 + 8?",
+      timestamp: "1700000000"
+    });
+
+    expect(result).toBe("processed");
+    expect(audit.events.some((event) => event.eventType === "assistant.conversation")).toBe(true);
+    expect(audit.events.some((event) => event.eventType === "company.report_request")).toBe(false);
   });
 
   it("rate-limits repeated authorized work before calling reports or WhatsApp", async () => {

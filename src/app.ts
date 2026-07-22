@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import type { Logger } from "pino";
 import { AuthorizationService } from "./auth/authorization.service.js";
 import { FallbackAssistantResponder } from "./assistant/fallback-responder.js";
+import { systemMessage } from "./assistant/system-messages.js";
 import { BotCommandRouter } from "./assistant/bot-command-router.js";
 import type { AssistantResponder } from "./assistant/types.js";
 import { NoopEventNotifier, SignedHttpEventNotifier, type EventNotifier } from "./integrations/event-notifier.js";
@@ -140,9 +141,22 @@ export async function buildApp(dependencies: AppDependencies) {
       sessions: mcpSessions,
       safetyIdentifierSecret: dependencies.config.safetyIdentifierSecret!,
       timezone: dependencies.config.companyTimezone,
-      maxToolCalls: dependencies.config.llm.maxToolCalls
+      maxToolCalls: dependencies.config.llm.maxToolCalls,
+      generalChatEnabled: dependencies.config.llm.generalChatEnabled
     });
-    responder = new FallbackAssistantResponder(llmAssistant, router, dependencies.logger);
+    const llmWithFallback = new FallbackAssistantResponder(
+      llmAssistant,
+      router,
+      dependencies.logger,
+      dependencies.config.llm.generalChatEnabled
+        ? (user) =>
+            systemMessage(
+              "processingFailed",
+              user.locale ?? dependencies.config.assistantLocale
+            )
+        : undefined
+    );
+    responder = llmWithFallback;
   }
 
   // Self-service bot commands (privacy notice, right-to-erasure, access

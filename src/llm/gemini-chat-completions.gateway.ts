@@ -209,8 +209,12 @@ export class GeminiChatCompletionsGateway implements LlmGateway {
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: request.instructions }] },
         contents: toGeminiNativeContents(request),
-        tools: toGeminiNativeTools(request.tools),
-        toolConfig: { functionCallingConfig: { mode: "AUTO" } },
+        ...(request.tools.length > 0
+          ? {
+              tools: toGeminiNativeTools(request.tools),
+              toolConfig: { functionCallingConfig: { mode: "AUTO" } }
+            }
+          : {}),
         generationConfig: { maxOutputTokens: this.options.maxOutputTokens }
       }),
       signal: AbortSignal.timeout(this.options.timeoutMs)

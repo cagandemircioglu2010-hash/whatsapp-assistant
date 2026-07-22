@@ -24,6 +24,11 @@ describe("application configuration", () => {
       loadConfig({ ...baseEnvironment, LLM_ENABLED: "true", OPENAI_API_KEY: "test-key" })
     ).toThrow("SAFETY_IDENTIFIER_SECRET");
     expect(loadConfig(baseEnvironment).llm.enabled).toBe(false);
+    expect(loadConfig(baseEnvironment).llm.generalChatEnabled).toBe(false);
+    expect(() =>
+      loadConfig({ ...baseEnvironment, LLM_GENERAL_CHAT_ENABLED: "true" })
+    ).toThrow("LLM_GENERAL_CHAT_ENABLED requires LLM_ENABLED=true");
+    expect(() => loadConfig({ ...baseEnvironment, LLM_PROVIDER: "unsupported" })).toThrow();
     expect(() =>
       loadConfig({
         ...baseEnvironment,
@@ -38,10 +43,12 @@ describe("application configuration", () => {
         LLM_ENABLED: "true",
         LLM_PROVIDER: "gemini",
         GEMINI_API_KEY: "gemini-test-key",
+        LLM_GENERAL_CHAT_ENABLED: "true",
         SAFETY_IDENTIFIER_SECRET: "s".repeat(32)
       }).llm
     ).toMatchObject({
       enabled: true,
+      generalChatEnabled: true,
       provider: "gemini",
       apiKey: "gemini-test-key",
       model: "gemini-3.5-flash"

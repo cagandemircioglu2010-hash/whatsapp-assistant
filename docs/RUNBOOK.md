@@ -105,7 +105,9 @@ Blueprint). It creates the database and the web service with migrations in
 `npm run setup:env -- --render` and paste them into the dashboard. The manual
 checklist below applies either way.
 
-- [ ] `WHATSAPP_ENABLED=true`, `LLM_ENABLED` as desired.
+- [ ] `WHATSAPP_ENABLED=true`, `LLM_ENABLED` as desired. Set
+      `LLM_GENERAL_CHAT_ENABLED=true` only on deployments that should answer
+      general questions; it requires `LLM_ENABLED=true` and defaults to `false`.
 - [ ] `WHATSAPP_ACCESS_TOKEN` — permanent System User token (§4).
 - [ ] `WHATSAPP_PHONE_NUMBER_ID` — the numeric ID from API Setup (not the
       phone number itself).
@@ -136,7 +138,8 @@ checklist below applies either way.
   accepted but delivery failed later; `metaErrorCodes` carries the reasons.
 - `LLM assistant failed; using deterministic fallback` — the LLM call broke;
   the user still gets the deterministic report answer. Check the LLM key,
-  model name, and provider status.
+  model name, and provider status. In hybrid mode, a general question receives
+  the localized temporary-failure notice instead of the unrelated report menu.
 - `Ignored WhatsApp message from a non-whitelisted sender` — add the sender
   with `npm run db:add-user` (§2).
 - `Recovered pending WhatsApp messages` — the recovery worker re-queued
@@ -183,6 +186,13 @@ standalone and point a locally running service at it.
 - With the LLM enabled, the assistant now receives the last few decrypted
   exchanges as context, so follow-up questions ("peki geciken görevler?")
   resolve naturally. History respects retention: purged content is skipped.
+  In hybrid mode, prior outbound company answers are omitted so a later
+  permission revocation cannot be bypassed by asking the model to repeat them.
+- `LLM_GENERAL_CHAT_ENABLED=true` enables hybrid behavior: general knowledge,
+  writing, translation, arithmetic, and everyday conversation use the LLM;
+  company facts still require the permission-filtered read-only tools. Leave
+  it `false` on report-only deployments. General turns are audited as
+  `assistant.conversation`, separately from `company.report_request` events.
 - `npm run db:whitelist-batch -- --file users.json` — onboard many users in
   one atomic transaction (all rows validated first; the error names the bad
   row). Same fields as `db:add-user`.

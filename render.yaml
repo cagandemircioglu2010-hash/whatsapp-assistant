@@ -88,6 +88,8 @@ services:
         sync: false
       - key: LLM_ENABLED
         sync: false
+      - key: LLM_GENERAL_CHAT_ENABLED
+        value: "false"
       - key: LLM_PROVIDER
         sync: false
       - key: GEMINI_API_KEY
