@@ -1,9 +1,9 @@
 import "dotenv/config";
 import { createHash } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { readdir } from "node:fs/promises";
 import pg from "pg";
 import { assertSafePostgresUrl, databaseTlsFromEnvironment } from "../config/database-tls.js";
+import { findMigrationsDirectory, readMigrationSql } from "./migration-files.js";
 
 const { Pool } = pg;
 
@@ -29,7 +29,7 @@ if (!databaseUrl) {
 assertSafePostgresUrl(databaseUrl);
 
 const ssl = databaseTlsFromEnvironment(process.env, scope === "company" ? "company" : "app");
-const migrationsDirectory = fileURLToPath(new URL("../../migrations/", import.meta.url));
+const migrationsDirectory = await findMigrationsDirectory(import.meta.url);
 const pool = new Pool({ connectionString: databaseUrl, ssl, max: 1 });
 const files = (await readdir(migrationsDirectory))
   .filter((filename) => /^\d+_.+\.sql$/.test(filename))
@@ -57,7 +57,7 @@ try {
   `);
 
   for (const filename of files) {
-    const sql = await readFile(new URL(`../../migrations/${filename}`, import.meta.url), "utf8");
+    const sql = await readMigrationSql(migrationsDirectory, filename);
     const checksum = createHash("sha256").update(sql).digest("hex");
     const existing = await client.query<{ checksum: string }>(
       "SELECT checksum FROM schema_migrations WHERE filename = $1",

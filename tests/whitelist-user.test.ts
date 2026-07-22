@@ -22,6 +22,59 @@ describe("whitelist user normalization", () => {
     expect(user.permissions).toEqual([]);
   });
 
+  it("reserves database exploration for explicitly permitted admin or executive users", () => {
+    expect(
+      normalizeWhitelistUser(
+        {
+          phone: "+905551112233",
+          name: "Database Admin",
+          role: "admin",
+          permissions: ["company.database.explore"]
+        },
+        "TR"
+      ).permissions
+    ).toEqual(["company.database.explore"]);
+    expect(() =>
+      normalizeWhitelistUser(
+        {
+          phone: "+905551112233",
+          name: "Database Manager",
+          role: "manager",
+          permissions: ["company.database.explore"]
+        },
+        "TR"
+      )
+    ).toThrow("requires the admin or executive role");
+    expect(
+      normalizeWhitelistUser(
+        {
+          phone: "+905551112233",
+          name: "Database Executive",
+          role: "executive",
+          permissions: [
+            "company.database.explore",
+            "company.database.relation.metrics"
+          ]
+        },
+        "TR"
+      ).permissions
+    ).toEqual([
+      "company.database.explore",
+      "company.database.relation.metrics"
+    ]);
+    expect(() =>
+      normalizeWhitelistUser(
+        {
+          phone: "+905551112233",
+          name: "Database Manager",
+          role: "manager",
+          permissions: ["company.database.relation.metrics"]
+        },
+        "TR"
+      )
+    ).toThrow("requires the admin or executive role");
+  });
+
   it("labels the offending row on invalid input", () => {
     expect(() => normalizeWhitelistUser({ phone: "not-a-number", name: "X" }, "TR", "row 4")).toThrow(/row 4/);
     expect(() => normalizeWhitelistUser({ phone: "+905551112233", name: "A" }, "TR", "row 2")).toThrow(/row 2: name/);

@@ -1,8 +1,12 @@
 # Render Blueprint — deploy with "New > Blueprint" pointing at this repo.
 # WARNING: the plans below create paid Render resources. This file does not
 # modify an existing service unless you explicitly create or apply a Blueprint.
-# Creates a managed Postgres and the assistant web service. Secret values are
-# left unsynced (sync: false): generate them locally with
+# Creates a managed Postgres and the assistant web service. It intentionally
+# does not inject an owner/admin URL into the web service or run migrations
+# there: production startup rejects migration credentials by design. Bootstrap
+# the database from a trusted workstation, provision the two restricted roles,
+# then paste only their URLs into the service (see docs/RUNBOOK.md §5).
+# Secret values are left unsynced (sync: false): generate them locally with
 #   npm run setup:env -- --render
 # and paste the block into the Render dashboard on first deploy.
 #
@@ -23,7 +27,6 @@ services:
     runtime: node
     plan: starter
     buildCommand: npm ci && npm run build
-    preDeployCommand: node dist/src/db/migrate.js
     startCommand: node dist/src/server.js
     healthCheckPath: /health/live
     autoDeploy: true
@@ -46,16 +49,12 @@ services:
         value: "true"
       - key: WHATSAPP_ENABLED
         value: "true"
-      # Migrations run with the database owner; the app itself should use the
-      # restricted role via DATABASE_URL once provisioned.
-      - key: DATABASE_ADMIN_URL
-        fromDatabase:
-          name: assistant-db
-          property: connectionString
       - key: DATABASE_SSL_MODE
-        value: require
+        value: verify-full
       - key: COMPANY_DATABASE_SSL_MODE
-        value: require
+        value: verify-full
+      - key: COMPANY_REPORTS_ENABLED
+        value: "true"
       # Everything below is a secret or account-specific: fill in the
       # dashboard (npm run setup:env -- --render prints ready-made values).
       - key: DATABASE_URL
@@ -90,6 +89,12 @@ services:
         sync: false
       - key: LLM_GENERAL_CHAT_ENABLED
         value: "false"
+      - key: LLM_SCHEMA_DISCOVERY_ENABLED
+        value: "false"
+      - key: LLM_SCHEMA_ALLOWED_SCHEMAS
+        value: assistant_reporting
+      # The app's reviewed three-view manifest is the default. Set
+      # LLM_SCHEMA_RELATION_MANIFEST explicitly for any other database schema.
       - key: LLM_PROVIDER
         sync: false
       - key: GEMINI_API_KEY

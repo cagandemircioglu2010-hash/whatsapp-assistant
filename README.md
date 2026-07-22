@@ -107,7 +107,9 @@ Migration/admin job ve çalışan service için ayrı secret setleri kullan.
 
 ## Production TLS
 
-Production config hem uygulama hem şirket DB'si için `verify-full` zorunlu kılar. TLS parametrelerini database URL
+Production config hem uygulama hem şirket DB'si için `verify-full` zorunlu kılar. Render'da iki runtime URL'si de
+sertifikadaki adla eşleşen tam **external hostname** kullanmalıdır; private/internal hostname'i doğrulamadan
+`verify-full` ile kullanmayın. TLS parametrelerini database URL
 içine koyma; tek doğruluk kaynağı aşağıdaki alanlardır:
 
 ```env
@@ -230,6 +232,8 @@ npm run db:list-access-requests -- --days 30 --full
 ```env
 LLM_ENABLED=true
 LLM_GENERAL_CHAT_ENABLED=true
+LLM_SCHEMA_DISCOVERY_ENABLED=false
+LLM_SCHEMA_ALLOWED_SCHEMAS=assistant_reporting
 LLM_PROVIDER=gemini
 GEMINI_API_KEY=<google-ai-studio-api-key>
 GEMINI_MODEL=gemini-3.5-flash
@@ -241,6 +245,49 @@ ise yalnızca mevcut yetki kontrollü, salt-okunur rapor araçlarından alınır
 değer `false` olduğundan mevcut dağıtımların davranışı bu seçenek açıkça etkinleştirilmedikçe değişmez.
 Hibrit modda önceki bot yanıtlarındaki şirket verileri modele yeniden verilmez;
 güncel yanıtlar her seferinde kullanıcının mevcut izinleriyle araçlardan tekrar alınır.
+
+### Şema-aware veritabanı soruları
+
+`LLM_SCHEMA_DISCOVERY_ENABLED=true`, yalnızca ayrıca
+`company.database.explore` izni verilmiş `admin` veya `executive` kullanıcılar
+için onaylı PostgreSQL raporlama görünümlerini keşfetmeyi açar. Model ham SQL çalıştırmaz.
+Önce erişilebilir görünüm ve güvenli alan adlarını okur, sonra filtre,
+toplama, gruplama, sıralama ve en fazla 50 satır içeren yapılandırılmış bir
+sorgu gönderir; sunucu bunu parametreli tek bir `SELECT` olarak derler.
+
+```bash
+npm run db:add-user -- \
+  --phone "+905..." --name "Database Admin" --role admin \
+  --permissions "company.sales,company.projects,company.tasks,company.database.explore"
+```
+
+Farklı bir PostgreSQL veritabanında yalnızca bu modu kullanmak için
+`COMPANY_REPORTS_ENABLED=false`, `LLM_SCHEMA_DISCOVERY_ENABLED=true` ve
+`LLM_SCHEMA_ALLOWED_SCHEMAS=analytics,reporting` ayarlanır. Ayrıca her görünüm,
+alan ve veri izni açıkça `LLM_SCHEMA_RELATION_MANIFEST` içinde onaylanmalıdır:
+
+```env
+LLM_SCHEMA_RELATION_MANIFEST=[{"relation":"analytics.metrics","columns":["metric_name","metric_value"],"filterColumns":["metric_name"],"resource":"company.database.relation.metrics","allowUnfiltered":false}]
+```
+
+Bağlantı hesabı mutlaka ayrı bir salt-okunur rol olmalı; yalnızca bu manifestteki
+raporlama görünümlerinde `SELECT` yetkisi bulunmalıdır. Kullanıcıya hem
+`company.database.explore` hem de görünümün `resource` izni verilir. `public` ve
+sistem şemaları, tablolar, foreign table'lar, JSON/binary/özel tipler, yaygın gizli
+kimlik alanları, ham SQL, join, alt sorgu ve yazma işlemleri kabul edilmez. Metin
+hücreleri SQL tarafında 500 karaktere sınırlandırılır. `allowUnfiltered=false`,
+yalnızca `filterColumns` üzerindeki eşitlik, aralık, IN veya en az üç karakterli prefix
+filtresini kabul eder; yalnızca küçük ve önceden özetlenmiş görünüm
+için insan incelemesi sonrası `true` yapılmalıdır. Böylece herhangi bir PostgreSQL
+veritabanı, güvenli raporlama görünümleri ve açık manifest eklenerek uyarlanabilir;
+LLM'in bütün rastgele veritabanını körlemesine yorumlamasına izin verilmez.
+
+Manifest aynı zamanda açık bir insan-incelemeli güven sınırıdır. Kod doğrudan
+foreign table'ı reddeder, ancak bir view'ın içindeki FDW, volatile/security-definer
+fonksiyonunu veya beklenmedik pahalı bağımlılığı semantik olarak kanıtlayamaz. Bu
+nedenle yalnızca tanımı ve bağımlılıkları incelenmiş görünümleri kullanın; view/şema
+DDL sahipliğini uygulama, kaynak sistem ve salt-okunur rollerden ayrı tutun ve mümkünse
+ayrı bir reporting/export veritabanı kullanın.
 
 Gemini ücretsiz katmanındaki istek ve yanıtlar Google ürünlerini iyileştirmek için kullanılabilir. OpenAI kullanmak
 için `LLM_PROVIDER=openai`, `OPENAI_API_KEY` ve `OPENAI_MODEL` ayarlanır.
@@ -373,9 +420,12 @@ npm run e2e:local                                  # kimlik bilgisi gerektirmeye
 npm run mock:meta                                  # sahte Graph API'yi tek başına çalıştır
 ```
 
-Render'a tek tıkla kurulum için repo kökündeki `render.yaml` Blueprint'i
-kullanılabilir; servis açılışta token'ın süresini de kontrol eder ve süresi
-yaklaşan/geçmiş token'ları loglarda uyarır.
+Render kaynaklarını oluşturmak için repo kökündeki `render.yaml` Blueprint'i
+kullanılabilir. Blueprint bilinçli olarak admin DB URL'sini web servisine vermez;
+migration ve restricted-role provisioning güvenilir bir iş istasyonundan bir
+kez tamamlanıp Render'a yalnızca runtime URL'leri girilmelidir. Servis açılışta
+token'ın süresini de kontrol eder ve süresi yaklaşan/geçmiş token'ları loglarda
+uyarır.
 
 Repository public kalacaksa GitHub Settings altında ayrıca branch ruleset, required CI/CodeQL/supply-chain checks,
 en az bir review, conversation resolution, signed commits, secret scanning, push protection ve private vulnerability

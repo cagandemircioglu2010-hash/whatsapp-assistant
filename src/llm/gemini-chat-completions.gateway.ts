@@ -96,9 +96,60 @@ function functionResponsePayload(output: string): Record<string, unknown> {
   }
 }
 
-function normalizeGeminiSchema(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalizeGeminiSchema);
+function resolveLocalSchemaReference(root: unknown, reference: string): unknown {
+  if (!reference.startsWith("#/")) {
+    throw new Error("Gemini tool schemas may only use local JSON Schema references");
+  }
+
+  let current = root;
+  for (const encodedSegment of reference.slice(2).split("/")) {
+    const segment = encodedSegment.replaceAll("~1", "/").replaceAll("~0", "~");
+    if (Array.isArray(current)) {
+      const index = Number(segment);
+      if (!Number.isSafeInteger(index) || index < 0 || index >= current.length) {
+        throw new Error(`Gemini tool schema contains an unresolved reference: ${reference}`);
+      }
+      current = current[index];
+      continue;
+    }
+    if (!isRecord(current) || !Object.hasOwn(current, segment)) {
+      throw new Error(`Gemini tool schema contains an unresolved reference: ${reference}`);
+    }
+    current = current[segment];
+  }
+  return current;
+}
+
+function normalizeGeminiSchema(
+  value: unknown,
+  root: unknown = value,
+  resolvingReferences: ReadonlySet<string> = new Set()
+): unknown {
+  if (Array.isArray(value)) {
+    return value.map((child) => normalizeGeminiSchema(child, root, resolvingReferences));
+  }
   if (!isRecord(value)) return value;
+
+  if (typeof value.$ref === "string") {
+    const reference = value.$ref;
+    if (resolvingReferences.has(reference)) {
+      throw new Error(`Gemini tool schema contains a cyclic reference: ${reference}`);
+    }
+    const target = resolveLocalSchemaReference(root, reference);
+    const normalizedTarget = normalizeGeminiSchema(
+      target,
+      root,
+      new Set([...resolvingReferences, reference])
+    );
+    const siblings = Object.fromEntries(
+      Object.entries(value).filter(([key]) => key !== "$ref")
+    );
+    if (Object.keys(siblings).length === 0) return normalizedTarget;
+    const normalizedSiblings = normalizeGeminiSchema(siblings, root, resolvingReferences);
+    return isRecord(normalizedTarget) && isRecord(normalizedSiblings)
+      ? { ...normalizedTarget, ...normalizedSiblings }
+      : normalizedTarget;
+  }
 
   if (
     Array.isArray(value.anyOf) &&
@@ -107,7 +158,7 @@ function normalizeGeminiSchema(value: unknown): unknown {
   ) {
     const nonNull = value.anyOf.find((candidate) => !(isRecord(candidate) && candidate.type === "null"));
     if (isRecord(nonNull)) {
-      const normalized = normalizeGeminiSchema(nonNull);
+      const normalized = normalizeGeminiSchema(nonNull, root, resolvingReferences);
       return isRecord(normalized)
         ? { ...normalized, ...(typeof value.description === "string" ? { description: value.description } : {}), nullable: true }
         : normalized;
@@ -116,8 +167,20 @@ function normalizeGeminiSchema(value: unknown): unknown {
 
   const normalized: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value)) {
-    if (["$schema", "additionalProperties", "pattern", "minLength", "maxLength"].includes(key)) continue;
-    normalized[key] = normalizeGeminiSchema(child);
+    if (
+      [
+        "$schema",
+        "$defs",
+        "definitions",
+        "additionalProperties",
+        "pattern",
+        "minLength",
+        "maxLength"
+      ].includes(key)
+    ) {
+      continue;
+    }
+    normalized[key] = normalizeGeminiSchema(child, root, resolvingReferences);
   }
   return normalized;
 }

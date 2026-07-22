@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, writeFileSync } from "node:fs";
+import { DEFAULT_REPORTING_RELATION_MANIFEST_JSON } from "../src/reports/schema-policy.js";
 
 // Onboarding bootstrap: generates a complete .env with strong random secrets
 // so a new deployment never starts from hand-rolled key material.
@@ -32,8 +33,8 @@ const readonlyPassword = password();
 const values: Array<[key: string, value: string, renderValue?: string | null]> = [
   ["POSTGRES_PASSWORD", postgresPassword, null],
   ["DATABASE_ADMIN_URL", `postgresql://postgres:${postgresPassword}@localhost:5432/company_assistant`, null],
-  ["APP_RUNTIME_USER", "company_assistant_app"],
-  ["APP_RUNTIME_PASSWORD", appRuntimePassword],
+  ["APP_RUNTIME_USER", "company_assistant_app", null],
+  ["APP_RUNTIME_PASSWORD", appRuntimePassword, null],
   [
     "DATABASE_URL",
     `postgresql://company_assistant_app:${appRuntimePassword}@localhost:5432/company_assistant`,
@@ -42,13 +43,14 @@ const values: Array<[key: string, value: string, renderValue?: string | null]> =
   ["DATABASE_SSL_MODE", "disable", "verify-full"],
   ["DATABASE_CA_CERT_FILE", "", ""],
   ["COMPANY_DATABASE_ADMIN_URL", `postgresql://postgres:${postgresPassword}@localhost:5432/company_assistant`, null],
-  ["COMPANY_READONLY_USER", "company_assistant_reader"],
-  ["COMPANY_READONLY_PASSWORD", readonlyPassword],
+  ["COMPANY_READONLY_USER", "company_assistant_reader", null],
+  ["COMPANY_READONLY_PASSWORD", readonlyPassword, null],
   [
     "COMPANY_READONLY_DATABASE_URL",
     `postgresql://company_assistant_reader:${readonlyPassword}@localhost:5432/company_assistant`,
     "<from your managed Postgres, using the read-only reporting role>"
   ],
+  ["COMPANY_REPORTS_ENABLED", "true"],
   ["COMPANY_DATABASE_SSL_MODE", "disable", "verify-full"],
   ["COMPANY_DATABASE_CA_CERT_FILE", "", ""],
   ["IDENTIFIER_HASH_ACTIVE_KEY_ID", keyId],
@@ -89,6 +91,9 @@ const values: Array<[key: string, value: string, renderValue?: string | null]> =
   ["WHATSAPP_DEBUG_LOGGING", "false"],
   ["LLM_ENABLED", "false", "true"],
   ["LLM_GENERAL_CHAT_ENABLED", "false"],
+  ["LLM_SCHEMA_DISCOVERY_ENABLED", "false"],
+  ["LLM_SCHEMA_ALLOWED_SCHEMAS", "assistant_reporting"],
+  ["LLM_SCHEMA_RELATION_MANIFEST", DEFAULT_REPORTING_RELATION_MANIFEST_JSON],
   ["LLM_PROVIDER", "gemini"],
   ["GEMINI_API_KEY", "", "<aistudio.google.com API key>"],
   ["GEMINI_MODEL", "gemini-3.5-flash"],

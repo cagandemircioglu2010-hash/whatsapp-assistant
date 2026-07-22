@@ -8,6 +8,15 @@ const baseEnvironment = {
   PHONE_HASH_SECRET: "x".repeat(32),
   WHATSAPP_ENABLED: "false"
 };
+const analyticsManifest = JSON.stringify([
+  {
+    relation: "analytics.metrics",
+    columns: ["metric_name", "metric_value"],
+    filterColumns: [],
+    resource: "company.database.relation.metrics",
+    allowUnfiltered: true
+  }
+]);
 
 describe("application configuration", () => {
   it("requires the selected provider key only when the LLM is enabled", () => {
@@ -25,9 +34,38 @@ describe("application configuration", () => {
     ).toThrow("SAFETY_IDENTIFIER_SECRET");
     expect(loadConfig(baseEnvironment).llm.enabled).toBe(false);
     expect(loadConfig(baseEnvironment).llm.generalChatEnabled).toBe(false);
+    expect(loadConfig(baseEnvironment).llm.schemaDiscoveryEnabled).toBe(false);
+    expect(loadConfig(baseEnvironment).llm.schemaAllowedSchemas).toEqual(["assistant_reporting"]);
+    expect(loadConfig(baseEnvironment).llm.schemaRelationManifest).toHaveLength(3);
+    expect(loadConfig(baseEnvironment).companyReportsEnabled).toBe(true);
     expect(() =>
       loadConfig({ ...baseEnvironment, LLM_GENERAL_CHAT_ENABLED: "true" })
     ).toThrow("LLM_GENERAL_CHAT_ENABLED requires LLM_ENABLED=true");
+    expect(() =>
+      loadConfig({ ...baseEnvironment, LLM_SCHEMA_DISCOVERY_ENABLED: "true" })
+    ).toThrow("LLM_SCHEMA_DISCOVERY_ENABLED requires LLM_ENABLED=true");
+    expect(() =>
+      loadConfig({
+        ...baseEnvironment,
+        COMPANY_REPORTS_ENABLED: "false",
+        LLM_ENABLED: "true",
+        LLM_SCHEMA_DISCOVERY_ENABLED: "true",
+        LLM_SCHEMA_ALLOWED_SCHEMAS: "analytics",
+        LLM_SCHEMA_RELATION_MANIFEST: analyticsManifest,
+        LLM_MAX_TOOL_CALLS: "1",
+        OPENAI_API_KEY: "test-key",
+        SAFETY_IDENTIFIER_SECRET: "s".repeat(32)
+      })
+    ).toThrow("one data query");
+    expect(() =>
+      loadConfig({ ...baseEnvironment, COMPANY_REPORTS_ENABLED: "false" })
+    ).toThrow("At least one company data mode must be enabled");
+    expect(() =>
+      loadConfig({ ...baseEnvironment, LLM_SCHEMA_ALLOWED_SCHEMAS: "pg_catalog" })
+    ).toThrow("non-system PostgreSQL schema names");
+    expect(() =>
+      loadConfig({ ...baseEnvironment, LLM_SCHEMA_ALLOWED_SCHEMAS: "public" })
+    ).toThrow("non-system PostgreSQL schema names");
     expect(() => loadConfig({ ...baseEnvironment, LLM_PROVIDER: "unsupported" })).toThrow();
     expect(() =>
       loadConfig({
@@ -52,6 +90,31 @@ describe("application configuration", () => {
       provider: "gemini",
       apiKey: "gemini-test-key",
       model: "gemini-3.5-flash"
+    });
+    expect(
+      loadConfig({
+        ...baseEnvironment,
+        COMPANY_REPORTS_ENABLED: "false",
+        LLM_ENABLED: "true",
+        LLM_SCHEMA_DISCOVERY_ENABLED: "true",
+        LLM_SCHEMA_ALLOWED_SCHEMAS: "analytics, reporting",
+        LLM_SCHEMA_RELATION_MANIFEST: analyticsManifest,
+        LLM_PROVIDER: "gemini",
+        GEMINI_API_KEY: "gemini-test-key",
+        SAFETY_IDENTIFIER_SECRET: "s".repeat(32)
+      })
+    ).toMatchObject({
+      companyReportsEnabled: false,
+      llm: {
+        schemaDiscoveryEnabled: true,
+        schemaAllowedSchemas: ["analytics", "reporting"],
+        schemaRelationManifest: [
+          expect.objectContaining({
+            relation: "analytics.metrics",
+            resource: "company.database.relation.metrics"
+          })
+        ]
+      }
     });
   });
 

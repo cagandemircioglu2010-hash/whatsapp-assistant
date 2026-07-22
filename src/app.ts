@@ -18,6 +18,7 @@ import { OpenAIResponsesGateway } from "./llm/openai-responses.gateway.js";
 import { GeminiChatCompletionsGateway } from "./llm/gemini-chat-completions.gateway.js";
 import { CompanyMcpSessionFactory } from "./mcp/session.js";
 import { CompanyReportRepository } from "./reports/company-report.repository.js";
+import { SchemaQueryRepository } from "./reports/schema-query.repository.js";
 import { ReportCommandRouter } from "./reports/report-command-router.js";
 import { WhatsAppApiError, WhatsAppClient } from "./whatsapp/client.js";
 import { registerWhatsAppRoutes } from "./whatsapp/routes.js";
@@ -117,8 +118,18 @@ export async function buildApp(dependencies: AppDependencies) {
   const audit = new AuditRepository(dependencies.appPool, auditIntegrity);
   const reports = new CompanyReportRepository(dependencies.companyReadonlyPool);
   const authorization = new AuthorizationService(permissions);
-  const router = new ReportCommandRouter(reports, authorization, dependencies.config.companyTimezone);
-  let responder: AssistantResponder = router;
+  const reportRouter = new ReportCommandRouter(reports, authorization, dependencies.config.companyTimezone);
+  const deterministicResponder: AssistantResponder = dependencies.config.companyReportsEnabled
+    ? reportRouter
+    : {
+        handle: async (user) => ({
+          resource: null,
+          resources: [],
+          outcome: "unsupported",
+          text: systemMessage("processingFailed", user.locale ?? dependencies.config.assistantLocale)
+        })
+      };
+  let responder: AssistantResponder = deterministicResponder;
 
   if (dependencies.config.llm.enabled) {
     const gateway = dependencies.config.llm.provider === "gemini"
@@ -135,20 +146,36 @@ export async function buildApp(dependencies: AppDependencies) {
           maxOutputTokens: dependencies.config.llm.maxOutputTokens,
           timeoutMs: dependencies.config.llm.timeoutMs
         });
-    const mcpSessions = new CompanyMcpSessionFactory({ reports, authorization, audit });
+    const reportingQueries = dependencies.config.llm.schemaDiscoveryEnabled
+      ? new SchemaQueryRepository(
+          dependencies.companyReadonlyPool,
+          dependencies.config.llm.schemaAllowedSchemas,
+          dependencies.config.llm.schemaRelationManifest
+        )
+      : undefined;
+    const mcpSessions = new CompanyMcpSessionFactory({
+      reports,
+      actorProvider: (actor) => users.findActiveById(actor.id),
+      reportsEnabled: dependencies.config.companyReportsEnabled,
+      ...(reportingQueries ? { reportingQueries } : {}),
+      authorization,
+      audit
+    });
     const llmAssistant = new CompanyLlmAssistant({
       gateway,
       sessions: mcpSessions,
       safetyIdentifierSecret: dependencies.config.safetyIdentifierSecret!,
       timezone: dependencies.config.companyTimezone,
       maxToolCalls: dependencies.config.llm.maxToolCalls,
-      generalChatEnabled: dependencies.config.llm.generalChatEnabled
+      generalChatEnabled: dependencies.config.llm.generalChatEnabled,
+      reportsEnabled: dependencies.config.companyReportsEnabled,
+      schemaDiscoveryEnabled: dependencies.config.llm.schemaDiscoveryEnabled
     });
     const llmWithFallback = new FallbackAssistantResponder(
       llmAssistant,
-      router,
+      deterministicResponder,
       dependencies.logger,
-      dependencies.config.llm.generalChatEnabled
+      dependencies.config.llm.generalChatEnabled || dependencies.config.llm.schemaDiscoveryEnabled
         ? (user) =>
             systemMessage(
               "processingFailed",
@@ -351,7 +378,13 @@ export async function buildApp(dependencies: AppDependencies) {
       const health = await readRuntimeHealth(
         dependencies.appPool,
         dependencies.companyReadonlyPool,
-        dependencies.config.dataLifecycleIntervalMinutes
+        dependencies.config.dataLifecycleIntervalMinutes,
+        {
+          reportsEnabled: dependencies.config.companyReportsEnabled,
+          schemaDiscoveryEnabled: dependencies.config.llm.schemaDiscoveryEnabled,
+          allowedSchemas: dependencies.config.llm.schemaAllowedSchemas,
+          relationManifest: dependencies.config.llm.schemaRelationManifest
+        }
       );
       const healthy =
         health.schemaReady &&

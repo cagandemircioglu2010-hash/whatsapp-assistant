@@ -197,6 +197,86 @@ describe("PostgreSQL migrations", () => {
     wrongAuditKey.destroy();
   });
 
+  it("starts against an approved schema-only company database without legacy reporting views", async () => {
+    const companyDb = new PGlite();
+    try {
+      await companyDb.exec(`
+        CREATE SCHEMA analytics;
+        CREATE TABLE analytics.metrics_source (
+          metric_name TEXT NOT NULL,
+          metric_value NUMERIC NOT NULL
+        );
+        CREATE VIEW analytics.metrics WITH (security_barrier = true) AS
+          SELECT metric_name, metric_value FROM analytics.metrics_source;
+      `);
+      const companyAdapter = {
+        query: (sql: string, parameters?: unknown[]) => companyDb.query(sql, parameters),
+        connect: async () => ({
+          query: (sql: string, parameters?: unknown[]) => companyDb.query(sql, parameters),
+          release: () => undefined
+        })
+      } as unknown as Pool;
+
+      await expect(
+        assertRuntimeReady(poolAdapter, companyAdapter, encryption, identifiers, auditIntegrity, {
+          reportsEnabled: false,
+          schemaDiscoveryEnabled: true,
+          allowedSchemas: ["analytics"],
+          relationManifest: [
+            {
+              relation: "analytics.metrics",
+              columns: ["metric_name", "metric_value"],
+              filterColumns: [],
+              resource: "company.database.relation.metrics",
+              allowUnfiltered: true
+            }
+          ]
+        })
+      ).resolves.toBeUndefined();
+    } finally {
+      await companyDb.close();
+    }
+  });
+
+  it("rejects schema-only readiness when the allowed schema has no safely discoverable catalog", async () => {
+    const companyDb = new PGlite();
+    try {
+      await companyDb.exec(`
+        CREATE SCHEMA analytics;
+        CREATE TABLE analytics.users (
+          id BIGINT NOT NULL,
+          password TEXT NOT NULL
+        );
+      `);
+      const companyAdapter = {
+        query: (sql: string, parameters?: unknown[]) => companyDb.query(sql, parameters),
+        connect: async () => ({
+          query: (sql: string, parameters?: unknown[]) => companyDb.query(sql, parameters),
+          release: () => undefined
+        })
+      } as unknown as Pool;
+
+      await expect(
+        assertRuntimeReady(poolAdapter, companyAdapter, encryption, identifiers, auditIntegrity, {
+          reportsEnabled: false,
+          schemaDiscoveryEnabled: true,
+          allowedSchemas: ["analytics"],
+          relationManifest: [
+            {
+              relation: "analytics.users",
+              columns: ["password"],
+              filterColumns: [],
+              resource: "company.database.relation.users",
+              allowUnfiltered: true
+            }
+          ]
+        })
+      ).rejects.toThrow("Configured company data sources are unavailable");
+    } finally {
+      await companyDb.close();
+    }
+  });
+
   it("enforces encrypted identity, role, identifier, and message constraints", async () => {
     const userId = await insertUser("+905551234567", "Test User");
     await db.query(
@@ -323,6 +403,13 @@ describe("PostgreSQL migrations", () => {
       phoneE164: phone,
       user: { department: "Finance" }
     });
+    await expect(users.findActiveById(id)).resolves.toMatchObject({
+      id,
+      department: "Finance",
+      role: "employee"
+    });
+    await db.query("UPDATE users SET is_active = FALSE WHERE id = $1", [id]);
+    await expect(users.findActiveById(id)).resolves.toBeNull();
   });
 
   it("runs reports inside read-only transactions", async () => {

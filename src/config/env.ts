@@ -8,11 +8,45 @@ import {
 } from "../security/keyed-hash.js";
 import { hydrateSecretFiles } from "./secret-source.js";
 import { assertSafePostgresUrl, type DatabaseTlsConfig } from "./database-tls.js";
+import {
+  DEFAULT_REPORTING_RELATION_MANIFEST_JSON,
+  assertReportingManifestDiscoveryBudget,
+  parseReportingRelationManifest,
+  type ReportingRelationPolicy
+} from "../reports/schema-policy.js";
 
 const booleanFromString = z
   .enum(["true", "false"])
   .default("false")
   .transform((value) => value === "true");
+
+const booleanDefaultTrue = z
+  .enum(["true", "false"])
+  .default("true")
+  .transform((value) => value === "true");
+
+const allowedSchemaList = z
+  .string()
+  .default("assistant_reporting")
+  .transform((value, context) => {
+    const schemas = [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))];
+    const invalid = schemas.find(
+      (schemaName) =>
+        !/^[A-Za-z_][A-Za-z0-9_$]{0,62}$/.test(schemaName) ||
+        schemaName.toLowerCase() === "public" ||
+        schemaName.toLowerCase() === "information_schema" ||
+        schemaName.toLowerCase().startsWith("pg_")
+    );
+    if (schemas.length === 0 || schemas.length > 10 || invalid) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "LLM_SCHEMA_ALLOWED_SCHEMAS must contain 1-10 comma-separated non-system PostgreSQL schema names"
+      });
+      return z.NEVER;
+    }
+    return schemas;
+  });
 
 const postgresUrl = z.string().url().refine((value) => {
   try {
@@ -46,6 +80,7 @@ const schema = z
     LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
     DATABASE_URL: postgresUrl,
     COMPANY_READONLY_DATABASE_URL: postgresUrl,
+    COMPANY_REPORTS_ENABLED: booleanDefaultTrue,
     DATABASE_ADMIN_URL: z.string().optional(),
     COMPANY_DATABASE_ADMIN_URL: z.string().optional(),
     POSTGRES_PASSWORD: z.string().optional(),
@@ -100,6 +135,12 @@ const schema = z
     WHATSAPP_DEBUG_LOGGING: booleanFromString,
     LLM_ENABLED: booleanFromString,
     LLM_GENERAL_CHAT_ENABLED: booleanFromString,
+    LLM_SCHEMA_DISCOVERY_ENABLED: booleanFromString,
+    LLM_SCHEMA_ALLOWED_SCHEMAS: allowedSchemaList,
+    LLM_SCHEMA_RELATION_MANIFEST: z
+      .string()
+      .min(2)
+      .default(DEFAULT_REPORTING_RELATION_MANIFEST_JSON),
     LLM_PROVIDER: z.enum(["openai", "gemini"]).default("openai"),
     OPENAI_API_KEY: z.string().optional(),
     OPENAI_MODEL: z.string().min(1).default("gpt-5.6-terra"),
@@ -437,6 +478,45 @@ const schema = z
         message: "LLM_GENERAL_CHAT_ENABLED requires LLM_ENABLED=true"
       });
     }
+    if (env.LLM_SCHEMA_DISCOVERY_ENABLED && !env.LLM_ENABLED) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["LLM_SCHEMA_DISCOVERY_ENABLED"],
+        message: "LLM_SCHEMA_DISCOVERY_ENABLED requires LLM_ENABLED=true"
+      });
+    }
+    try {
+      const relationManifest = parseReportingRelationManifest(
+        env.LLM_SCHEMA_RELATION_MANIFEST,
+        env.LLM_SCHEMA_ALLOWED_SCHEMAS
+      );
+      if (env.LLM_SCHEMA_DISCOVERY_ENABLED) {
+        const discoveryPages = assertReportingManifestDiscoveryBudget(
+          relationManifest,
+          env.LLM_SCHEMA_ALLOWED_SCHEMAS
+        );
+        if (env.LLM_MAX_TOOL_CALLS < discoveryPages + 1) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["LLM_MAX_TOOL_CALLS"],
+            message: `LLM_MAX_TOOL_CALLS must allow ${discoveryPages} schema page(s) and one data query`
+          });
+        }
+      }
+    } catch (error) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["LLM_SCHEMA_RELATION_MANIFEST"],
+        message: error instanceof Error ? error.message : "Reporting relation manifest is invalid"
+      });
+    }
+    if (!env.COMPANY_REPORTS_ENABLED && !env.LLM_SCHEMA_DISCOVERY_ENABLED) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["COMPANY_REPORTS_ENABLED"],
+        message: "At least one company data mode must be enabled"
+      });
+    }
     if (env.LLM_ENABLED && env.NODE_ENV === "production" && (selectedLlmApiKey?.length ?? 0) < 20) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -472,6 +552,7 @@ export type AppConfig = {
   logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
   databaseUrl: string;
   companyReadonlyDatabaseUrl: string;
+  companyReportsEnabled: boolean;
   databaseTls: DatabaseTlsConfig;
   companyDatabaseTls: DatabaseTlsConfig;
   identifierHash: HmacKeyRingConfig;
@@ -511,6 +592,9 @@ export type AppConfig = {
   llm: {
     enabled: boolean;
     generalChatEnabled: boolean;
+    schemaDiscoveryEnabled: boolean;
+    schemaAllowedSchemas: string[];
+    schemaRelationManifest: ReportingRelationPolicy[];
     provider: "openai" | "gemini";
     apiKey?: string;
     model: string;
@@ -523,6 +607,10 @@ export type AppConfig = {
 
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppConfig {
   const env = schema.parse(hydrateSecretFiles(environment));
+  const schemaRelationManifest = parseReportingRelationManifest(
+    env.LLM_SCHEMA_RELATION_MANIFEST,
+    env.LLM_SCHEMA_ALLOWED_SCHEMAS
+  );
   const dataEncryption =
     env.DATA_ENCRYPTION_ACTIVE_KEY_ID && env.DATA_ENCRYPTION_KEYS
       ? parseDataEncryptionConfig(env.DATA_ENCRYPTION_KEYS, env.DATA_ENCRYPTION_ACTIVE_KEY_ID)
@@ -546,6 +634,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     logLevel: env.LOG_LEVEL,
     databaseUrl: env.DATABASE_URL,
     companyReadonlyDatabaseUrl: env.COMPANY_READONLY_DATABASE_URL,
+    companyReportsEnabled: env.COMPANY_REPORTS_ENABLED,
     databaseTls: tls(appTlsMode, env.DATABASE_CA_CERT),
     companyDatabaseTls: tls(companyTlsMode, env.COMPANY_DATABASE_CA_CERT ?? env.DATABASE_CA_CERT),
     identifierHash,
@@ -587,6 +676,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     llm: {
       enabled: env.LLM_ENABLED,
       generalChatEnabled: env.LLM_GENERAL_CHAT_ENABLED,
+      schemaDiscoveryEnabled: env.LLM_SCHEMA_DISCOVERY_ENABLED,
+      schemaAllowedSchemas: env.LLM_SCHEMA_ALLOWED_SCHEMAS,
+      schemaRelationManifest,
       provider: env.LLM_PROVIDER,
       ...(env.LLM_PROVIDER === "gemini"
         ? env.GEMINI_API_KEY

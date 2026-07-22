@@ -60,6 +60,7 @@ try {
   await client.query(format("ALTER ROLE %I SET default_transaction_read_only = on", roleName));
   await client.query(format("ALTER ROLE %I SET statement_timeout = '5s'", roleName));
   await client.query(format("ALTER ROLE %I SET lock_timeout = '2s'", roleName));
+  await client.query(format("ALTER ROLE %I SET max_parallel_workers_per_gather = 0", roleName));
   await client.query(format("ALTER ROLE %I SET idle_in_transaction_session_timeout = '10s'", roleName));
   await client.query(format("ALTER ROLE %I SET search_path = pg_catalog, assistant_reporting", roleName));
   await client.query(format("GRANT CONNECT ON DATABASE %I TO %I", databaseName, roleName));
