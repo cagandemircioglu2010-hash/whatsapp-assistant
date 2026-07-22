@@ -7,6 +7,7 @@ import { companyToolResources, createCompanyMcpServer } from "./company-server.j
 import type { CompanyReports } from "../reports/company-report.repository.js";
 import type { AuditStore } from "../messages/audit.repository.js";
 import type { AuthorizationService } from "../auth/authorization.service.js";
+import type { ReportingQueries } from "../reports/schema-query.repository.js";
 
 export type McpToolDescriptor = {
   name: string;
@@ -32,9 +33,14 @@ export interface CompanyMcpSessionFactoryLike {
 
 type FactoryDependencies = {
   reports: CompanyReports;
+  actorProvider?: (actor: AuthorizedUser) => Promise<AuthorizedUser | null>;
+  reportsEnabled?: boolean;
+  reportingQueries?: ReportingQueries;
   authorization: AuthorizationService;
   audit: AuditStore;
 };
+
+const databaseExplorerRoles = new Set(["executive", "admin"]);
 
 class InMemoryCompanyMcpSession implements CompanyMcpSession {
   constructor(
@@ -75,17 +81,34 @@ export class CompanyMcpSessionFactory implements CompanyMcpSessionFactoryLike {
   constructor(private readonly dependencies: FactoryDependencies) {}
 
   async open(actor: AuthorizedUser, context: AssistantContext): Promise<CompanyMcpSession> {
-    const toolResourceEntries = Object.entries(companyToolResources);
-    const permissionChecks = await Promise.all(
-      toolResourceEntries.map(([, resource]) => this.dependencies.authorization.isAllowed(actor.id, resource))
+    const toolResourceEntries = Object.entries(companyToolResources).filter(([toolName]) => {
+      if (toolName === "describe_database" || toolName === "query_database") {
+        return Boolean(this.dependencies.reportingQueries) && databaseExplorerRoles.has(actor.role.toLowerCase());
+      }
+      return this.dependencies.reportsEnabled !== false;
+    });
+    const allowedResources = await this.dependencies.authorization.allowedResources(
+      actor.id,
+      toolResourceEntries.map(([, resource]) => resource)
     );
     const allowedToolNames = new Set(
-      toolResourceEntries.filter((_, index) => permissionChecks[index]).map(([toolName]) => toolName)
+      toolResourceEntries
+        .filter(([, resource]) => allowedResources.has(resource))
+        .map(([toolName]) => toolName)
     );
     const server = createCompanyMcpServer({
       actor,
+      ...(this.dependencies.actorProvider
+        ? { actorProvider: () => this.dependencies.actorProvider!(actor) }
+        : {}),
       messageId: context.messageId,
       reports: this.dependencies.reports,
+      ...(typeof this.dependencies.reportsEnabled === "boolean"
+        ? { reportsEnabled: this.dependencies.reportsEnabled }
+        : {}),
+      ...(this.dependencies.reportingQueries
+        ? { reportingQueries: this.dependencies.reportingQueries }
+        : {}),
       authorization: this.dependencies.authorization,
       audit: this.dependencies.audit
     });

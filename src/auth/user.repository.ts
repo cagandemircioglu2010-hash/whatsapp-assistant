@@ -75,6 +75,18 @@ export class UserRepository implements UserLookup {
     return this.authorizedUser(user);
   }
 
+  async findActiveById(userId: string): Promise<AuthorizedUser | null> {
+    const result = await this.pool.query<UserRow>(
+      `SELECT id, department_ciphertext, role, locale
+       FROM users
+       WHERE id = $1 AND is_active = TRUE
+       LIMIT 1`,
+      [userId]
+    );
+    const user = result.rows[0];
+    return user ? this.authorizedUser(user) : null;
+  }
+
   async findActiveIdentityById(userId: string): Promise<AuthorizedUserIdentity | null> {
     const result = await this.pool.query<UserIdentityRow>(
       `SELECT id, department_ciphertext, role, locale, phone_ciphertext

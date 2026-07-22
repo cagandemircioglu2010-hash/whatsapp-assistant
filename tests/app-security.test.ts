@@ -15,6 +15,7 @@ function config(): AppConfig {
     logLevel: "silent",
     databaseUrl: "postgresql://test:test@localhost:5432/app",
     companyReadonlyDatabaseUrl: "postgresql://test:test@localhost:5432/company",
+    companyReportsEnabled: true,
     databaseTls: false,
     companyDatabaseTls: false,
     identifierHash: legacyHmacKeyRing("x".repeat(32)),
@@ -40,6 +41,9 @@ function config(): AppConfig {
     llm: {
       enabled: false,
       generalChatEnabled: false,
+      schemaDiscoveryEnabled: false,
+      schemaAllowedSchemas: ["assistant_reporting"],
+      schemaRelationManifest: [],
       provider: "openai",
       model: "test-model",
       reasoningEffort: "low",

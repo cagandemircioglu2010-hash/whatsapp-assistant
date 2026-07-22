@@ -7,6 +7,7 @@ import { loadConfig } from "../config/env.js";
 import { createDatabasePool } from "../db/pools.js";
 import { AuditRepository } from "../messages/audit.repository.js";
 import { CompanyReportRepository } from "../reports/company-report.repository.js";
+import { SchemaQueryRepository } from "../reports/schema-query.repository.js";
 import { normalizePhoneNumber } from "../security/phone.js";
 import { createCompanyMcpServer } from "./company-server.js";
 import { EnvelopeEncryption } from "../security/encryption.js";
@@ -38,7 +39,12 @@ const auditIntegrity = new VersionedHmac(config.auditIntegrity);
 try {
   if (config.nodeEnv === "production") {
     if (!encryption) throw new Error("Production encryption configuration is missing");
-    await assertRuntimeReady(appPool, readonlyPool, encryption, identifiers, auditIntegrity);
+    await assertRuntimeReady(appPool, readonlyPool, encryption, identifiers, auditIntegrity, {
+      reportsEnabled: config.companyReportsEnabled,
+      schemaDiscoveryEnabled: config.llm.schemaDiscoveryEnabled,
+      allowedSchemas: config.llm.schemaAllowedSchemas,
+      relationManifest: config.llm.schemaRelationManifest
+    });
   }
   const users = new UserRepository(appPool, identifiers, encryption);
   const actor = await users.findActiveByPhone(actorPhone);
@@ -46,7 +52,21 @@ try {
 
   const server = createCompanyMcpServer({
     actor,
+    actorProvider: async () => {
+      const currentActor = await users.findActiveByPhone(actorPhone);
+      return currentActor?.id === actor.id ? currentActor : null;
+    },
     reports: new CompanyReportRepository(readonlyPool),
+    reportsEnabled: config.companyReportsEnabled,
+    ...(config.llm.schemaDiscoveryEnabled
+      ? {
+          reportingQueries: new SchemaQueryRepository(
+            readonlyPool,
+            config.llm.schemaAllowedSchemas,
+            config.llm.schemaRelationManifest
+          )
+        }
+      : {}),
     authorization: new AuthorizationService(new PermissionRepository(appPool)),
     audit: new AuditRepository(appPool, auditIntegrity)
   });

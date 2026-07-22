@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AuthorizationService } from "../src/auth/authorization.service.js";
 import {
   GeminiChatCompletionsGateway,
   toGeminiNativeContents,
   toGeminiNativeTools
 } from "../src/llm/gemini-chat-completions.gateway.js";
+import { CompanyMcpSessionFactory } from "../src/mcp/session.js";
 
 describe("Gemini native generateContent gateway", () => {
   afterEach(() => vi.restoreAllMocks());
@@ -92,6 +94,154 @@ describe("Gemini native generateContent gateway", () => {
         ]
       }
     ]);
+  });
+
+  it("dereferences nested MCP schemas before sending them to Gemini", () => {
+    const nativeTools = toGeminiNativeTools([
+      {
+        type: "function",
+        name: "query_database",
+        parameters: {
+          type: "object",
+          properties: {
+            columns: { type: "array", items: { type: "string", pattern: "^[a-z_]+$" } },
+            filters: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  column: { $ref: "#/properties/columns/items" },
+                  value: {
+                    anyOf: [
+                      { $ref: "#/properties/columns/items" },
+                      { type: "null" }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          additionalProperties: false,
+          $schema: "http://json-schema.org/draft-07/schema#"
+        },
+        strict: true
+      }
+    ]);
+
+    expect(JSON.stringify(nativeTools)).not.toMatch(/\$ref|\$schema|pattern/);
+    expect(nativeTools).toEqual([
+      {
+        functionDeclarations: [
+          {
+            name: "query_database",
+            parameters: {
+              type: "object",
+              properties: {
+                columns: { type: "array", items: { type: "string" } },
+                filters: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      column: { type: "string" },
+                      value: { type: "string", nullable: true }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]);
+  });
+
+  it("converts the real structured database-query descriptor without JSON references", async () => {
+    const session = await new CompanyMcpSessionFactory({
+      reports: {
+        getSalesSummary: async () => ({
+          startDate: "2026-07-01",
+          endDate: "2026-07-02",
+          currencies: [],
+          generatedAt: "2026-07-02T00:00:00.000Z"
+        }),
+        getActiveProjects: async () => [],
+        getOverdueTasks: async () => []
+      },
+      reportsEnabled: false,
+      reportingQueries: {
+        relationPolicies: () => [
+          {
+            relation: "assistant_reporting.sales_daily",
+            columns: ["sale_date"],
+            filterColumns: [],
+            resource: "company.sales",
+            allowUnfiltered: true
+          }
+        ],
+        discoverSchema: async () => ({
+          schemas: ["assistant_reporting"],
+          relations: [],
+          limits: { maxRows: 50, joinsSupported: false, rawSqlAccepted: false },
+          truncated: false,
+          nextCursor: null
+        }),
+        query: async (input) => ({
+          relation: input.relation,
+          columns: input.columns,
+          rows: [],
+          rowCount: 0,
+          truncated: false
+        }),
+        isReady: async () => true
+      },
+      authorization: new AuthorizationService({ has: async () => true }),
+      audit: { record: async () => undefined }
+    }).open(
+      { id: "schema-admin", department: null, role: "admin" },
+      { messageId: "gemini-schema" }
+    );
+
+    try {
+      const descriptor = (await session.listTools()).find(
+        (tool) => tool.name === "query_database"
+      );
+      expect(descriptor).toBeDefined();
+      const converted = toGeminiNativeTools([
+        {
+          type: "function",
+          name: descriptor!.name,
+          parameters: descriptor!.inputSchema,
+          strict: true
+        }
+      ]);
+      const serialized = JSON.stringify(converted);
+      expect(serialized).not.toMatch(/\$ref|\$defs|\$schema/);
+      expect(serialized).toContain('"relation"');
+      expect(serialized).toContain('"aggregates"');
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("rejects unresolved or cyclic tool-schema references", () => {
+    const makeTool = (parameters: Record<string, unknown>) => [
+      { type: "function" as const, name: "unsafe_schema", parameters, strict: true }
+    ];
+
+    expect(() =>
+      toGeminiNativeTools(makeTool({ type: "object", properties: { value: { $ref: "#/missing" } } }))
+    ).toThrow("unresolved reference");
+    expect(() =>
+      toGeminiNativeTools(
+        makeTool({ type: "object", properties: { value: { $ref: "#/properties/value" } } })
+      )
+    ).toThrow("cyclic reference");
+    expect(() =>
+      toGeminiNativeTools(
+        makeTool({ type: "object", properties: { value: { $ref: "https://example.com/schema" } } })
+      )
+    ).toThrow("only use local");
   });
 
   it("authenticates native Gemini requests with x-goog-api-key", async () => {

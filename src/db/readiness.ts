@@ -1,4 +1,9 @@
 import type { Pool } from "pg";
+import { SchemaQueryRepository } from "../reports/schema-query.repository.js";
+import {
+  DEFAULT_REPORTING_RELATION_MANIFEST,
+  type ReportingRelationPolicy
+} from "../reports/schema-policy.js";
 import type { EnvelopeEncryption } from "../security/encryption.js";
 import type { VersionedHmac } from "../security/keyed-hash.js";
 
@@ -6,7 +11,85 @@ export const REQUIRED_APP_MIGRATION = "006_finalize_security_controls.sql";
 export const REQUIRED_COMPANY_MIGRATION = "002_company_reporting.sql";
 const CANARY_NAME = "primary-encryption-canary";
 const CANARY_VALUE = "company-whatsapp-assistant-encryption-canary-v1";
+const COMPANY_READINESS_CACHE_MS = 30_000;
 type Queryable = Pick<Pool, "query">;
+const companyReadinessCache = new WeakMap<
+  Pool,
+  { key: string; expiresAt: number; promise: Promise<boolean> }
+>();
+
+export type CompanyDataReadinessOptions = {
+  reportsEnabled?: boolean;
+  schemaDiscoveryEnabled?: boolean;
+  allowedSchemas?: readonly string[];
+  relationManifest?: readonly ReportingRelationPolicy[];
+};
+
+function dataReadinessOptions(options: CompanyDataReadinessOptions = {}) {
+  return {
+    reportsEnabled: options.reportsEnabled ?? true,
+    schemaDiscoveryEnabled: options.schemaDiscoveryEnabled ?? false,
+    allowedSchemas: options.allowedSchemas ?? ["assistant_reporting"],
+    relationManifest: options.relationManifest ?? DEFAULT_REPORTING_RELATION_MANIFEST
+  };
+}
+
+async function companyDataReady(
+  companyPool: Pool,
+  options: CompanyDataReadinessOptions = {}
+): Promise<boolean> {
+  const selected = dataReadinessOptions(options);
+  let reportsReady = !selected.reportsEnabled;
+  let schemaReady = !selected.schemaDiscoveryEnabled;
+  if (selected.reportsEnabled) {
+    const result = await companyPool.query<{ ready: boolean }>(
+      `SELECT to_regclass('assistant_reporting.sales_daily') IS NOT NULL
+          AND to_regclass('assistant_reporting.active_projects') IS NOT NULL
+          AND to_regclass('assistant_reporting.overdue_tasks') IS NOT NULL AS ready`
+    );
+    reportsReady = result.rows[0]?.ready === true;
+  }
+  if (selected.schemaDiscoveryEnabled) {
+    schemaReady = await new SchemaQueryRepository(
+      companyPool,
+      selected.allowedSchemas,
+      selected.relationManifest
+    ).isReady();
+  }
+  return reportsReady && schemaReady;
+}
+
+function companyReadinessKey(options: CompanyDataReadinessOptions): string {
+  const selected = dataReadinessOptions(options);
+  return JSON.stringify({
+    reportsEnabled: selected.reportsEnabled,
+    schemaDiscoveryEnabled: selected.schemaDiscoveryEnabled,
+    allowedSchemas: selected.allowedSchemas,
+    relationManifest: selected.relationManifest
+  });
+}
+
+async function cachedCompanyDataReady(
+  companyPool: Pool,
+  options: CompanyDataReadinessOptions
+): Promise<boolean> {
+  const key = companyReadinessKey(options);
+  const existing = companyReadinessCache.get(companyPool);
+  if (existing?.key === key && existing.expiresAt > Date.now()) return existing.promise;
+
+  let promise: Promise<boolean>;
+  promise = companyDataReady(companyPool, options).catch((error) => {
+    const current = companyReadinessCache.get(companyPool);
+    if (current?.promise === promise) companyReadinessCache.delete(companyPool);
+    throw error;
+  });
+  companyReadinessCache.set(companyPool, {
+    key,
+    expiresAt: Date.now() + COMPANY_READINESS_CACHE_MS,
+    promise
+  });
+  return promise;
+}
 
 async function migrationApplied(pool: Pool, filename: string): Promise<boolean> {
   const result = await pool.query<{ applied: boolean }>(
@@ -100,7 +183,8 @@ export async function assertRuntimeReady(
   companyPool: Pool,
   encryption: EnvelopeEncryption,
   identifiers: VersionedHmac,
-  auditIntegrity: VersionedHmac
+  auditIntegrity: VersionedHmac,
+  companyDataOptions: CompanyDataReadinessOptions = {}
 ): Promise<void> {
   if (!(await migrationApplied(appPool, REQUIRED_APP_MIGRATION))) {
     throw new Error(`Application database migration is missing: ${REQUIRED_APP_MIGRATION}`);
@@ -115,29 +199,28 @@ export async function assertRuntimeReady(
 
   await ensureSecurityCanary(appPool, encryption, identifiers, auditIntegrity);
 
-  const companyReady = await companyPool.query<{ ready: boolean }>(
-    `SELECT to_regclass('assistant_reporting.sales_daily') IS NOT NULL
-        AND to_regclass('assistant_reporting.active_projects') IS NOT NULL
-        AND to_regclass('assistant_reporting.overdue_tasks') IS NOT NULL AS ready`
-  );
-  if (companyReady.rows[0]?.ready !== true) throw new Error("Company reporting views are unavailable");
-  await Promise.all([
-    companyPool.query(
-      `SELECT sale_date, currency, completed_sales_count, completed_revenue,
-              refund_count, refunded_amount
-       FROM assistant_reporting.sales_daily WHERE FALSE`
-    ),
-    companyPool.query(
-      `SELECT id, name, department, status, owner_name, start_date, due_date,
-              updated_at, open_task_count, overdue_task_count
-       FROM assistant_reporting.active_projects WHERE FALSE`
-    ),
-    companyPool.query(
-      `SELECT id, project_id, project_name, department, title, status,
-              assignee_name, priority, due_date, days_overdue, updated_at
-       FROM assistant_reporting.overdue_tasks WHERE FALSE`
-    )
-  ]);
+  if (!(await companyDataReady(companyPool, companyDataOptions))) {
+    throw new Error("Configured company data sources are unavailable");
+  }
+  if (dataReadinessOptions(companyDataOptions).reportsEnabled) {
+    await Promise.all([
+      companyPool.query(
+        `SELECT sale_date, currency, completed_sales_count, completed_revenue,
+                refund_count, refunded_amount
+         FROM assistant_reporting.sales_daily WHERE FALSE`
+      ),
+      companyPool.query(
+        `SELECT id, name, department, status, owner_name, start_date, due_date,
+                updated_at, open_task_count, overdue_task_count
+         FROM assistant_reporting.active_projects WHERE FALSE`
+      ),
+      companyPool.query(
+        `SELECT id, project_id, project_name, department, title, status,
+                assignee_name, priority, due_date, days_overdue, updated_at
+         FROM assistant_reporting.overdue_tasks WHERE FALSE`
+      )
+    ]);
+  }
 }
 
 export type RuntimeHealth = {
@@ -151,7 +234,8 @@ export type RuntimeHealth = {
 export async function readRuntimeHealth(
   appPool: Pool,
   companyPool: Pool,
-  lifecycleIntervalMinutes: number
+  lifecycleIntervalMinutes: number,
+  companyDataOptions: CompanyDataReadinessOptions = {}
 ): Promise<RuntimeHealth> {
   const [app, company] = await Promise.all([
     appPool.query<{
@@ -179,18 +263,14 @@ export async function readRuntimeHealth(
               OR (status = 'failed' AND processing_attempts < 3))) AS pending_messages`,
       [REQUIRED_APP_MIGRATION, lifecycleIntervalMinutes]
     ),
-    companyPool.query<{ ready: boolean }>(
-      `SELECT to_regclass('assistant_reporting.sales_daily') IS NOT NULL
-          AND to_regclass('assistant_reporting.active_projects') IS NOT NULL
-          AND to_regclass('assistant_reporting.overdue_tasks') IS NOT NULL AS ready`
-    )
+    cachedCompanyDataReady(companyPool, companyDataOptions)
   ]);
   const row = app.rows[0];
   return {
     schemaReady: row?.schema_ready === true,
     serviceActive: row?.service_active === true,
     lifecycleHealthy: row?.lifecycle_healthy === true,
-    companyViewsReady: company.rows[0]?.ready === true,
+    companyViewsReady: company,
     pendingMessages: Number(row?.pending_messages ?? 0)
   };
 }

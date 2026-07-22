@@ -19,19 +19,37 @@ const companyPool = createDatabasePool(config.companyReadonlyDatabaseUrl, {
   applicationName: "company-assistant-reporting-readiness-check",
   forceReadOnly: true
 });
+const companyDataOptions = {
+  reportsEnabled: config.companyReportsEnabled,
+  schemaDiscoveryEnabled: config.llm.schemaDiscoveryEnabled,
+  allowedSchemas: config.llm.schemaAllowedSchemas,
+  relationManifest: config.llm.schemaRelationManifest
+};
 
 try {
   const encryption = new EnvelopeEncryption(config.dataEncryption);
   const identifiers = new VersionedHmac(config.identifierHash);
   const auditIntegrity = new VersionedHmac(config.auditIntegrity);
   try {
-    await assertRuntimeReady(appPool, companyPool, encryption, identifiers, auditIntegrity);
+    await assertRuntimeReady(
+      appPool,
+      companyPool,
+      encryption,
+      identifiers,
+      auditIntegrity,
+      companyDataOptions
+    );
   } finally {
     encryption.destroy();
     identifiers.destroy();
     auditIntegrity.destroy();
   }
-  const health = await readRuntimeHealth(appPool, companyPool, config.dataLifecycleIntervalMinutes);
+  const health = await readRuntimeHealth(
+    appPool,
+    companyPool,
+    config.dataLifecycleIntervalMinutes,
+    companyDataOptions
+  );
   if (!health.schemaReady || !health.serviceActive || !health.companyViewsReady) {
     throw new Error("Runtime readiness checks failed");
   }

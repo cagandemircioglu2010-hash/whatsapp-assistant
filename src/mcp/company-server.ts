@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { AuthorizationService, PermissionDeniedError } from "../auth/authorization.service.js";
@@ -5,19 +6,33 @@ import type { AuthorizedUser } from "../auth/types.js";
 import { reportResources } from "../auth/types.js";
 import type { AuditStore } from "../messages/audit.repository.js";
 import type { CompanyReports } from "../reports/company-report.repository.js";
+import { MAX_SCHEMA_DISCOVERY_CALLS_PER_MESSAGE } from "../reports/schema-policy.js";
+import {
+  reportingSchemaInputShape,
+  reportingQueryInputShape,
+  ReportingQueryError,
+  type ReportingQueries
+} from "../reports/schema-query.repository.js";
+
+export { MAX_SCHEMA_DISCOVERY_CALLS_PER_MESSAGE } from "../reports/schema-policy.js";
 
 export const companyToolResources = {
   get_sales_summary: reportResources.sales,
   get_active_projects: reportResources.projects,
-  get_overdue_tasks: reportResources.tasks
+  get_overdue_tasks: reportResources.tasks,
+  describe_database: reportResources.databaseExplore,
+  query_database: reportResources.databaseExplore
 } as const;
 
 export type CompanyToolName = keyof typeof companyToolResources;
 
 type CompanyMcpServerDependencies = {
   actor: AuthorizedUser;
+  actorProvider?: () => Promise<AuthorizedUser | null>;
   messageId?: string;
   reports: CompanyReports;
+  reportsEnabled?: boolean;
+  reportingQueries?: ReportingQueries;
   authorization: AuthorizationService;
   audit: AuditStore;
 };
@@ -31,6 +46,7 @@ const readOnlyAnnotations = {
 } as const;
 
 const crossDepartmentRoles = new Set(["manager", "executive", "admin"]);
+const databaseExplorerRoles = new Set(["executive", "admin"]);
 
 function scopedListOptions(
   actor: AuthorizedUser,
@@ -50,19 +66,37 @@ export function createCompanyMcpServer(dependencies: CompanyMcpServerDependencie
 
   async function runTool<T extends Record<string, unknown>>(
     toolName: CompanyToolName,
-    operation: () => Promise<T>
+    operation: (actor: AuthorizedUser) => Promise<T>,
+    auditOptions: {
+      resource?: string;
+      details?: Record<string, unknown>;
+      successDetails?: (data: T) => Record<string, unknown>;
+    } = {}
   ) {
-    const resource = companyToolResources[toolName];
+    const authorizationResource = companyToolResources[toolName];
+    const resource = auditOptions.resource ?? authorizationResource;
+    const startedAt = performance.now();
     try {
-      await dependencies.authorization.require(dependencies.actor.id, resource);
-      const data = await operation();
+      const actor = dependencies.actorProvider
+        ? await dependencies.actorProvider()
+        : dependencies.actor;
+      if (!actor || actor.id !== dependencies.actor.id) {
+        throw new PermissionDeniedError(authorizationResource);
+      }
+      await dependencies.authorization.require(actor.id, authorizationResource);
+      const data = await operation(actor);
       await dependencies.audit.record({
-        userId: dependencies.actor.id,
+        userId: actor.id,
         eventType: "mcp.tool_call",
         resource,
         outcome: "success",
         messageId: dependencies.messageId ?? null,
-        details: { toolName }
+        details: {
+          toolName,
+          ...auditOptions.details,
+          ...auditOptions.successDetails?.(data),
+          durationMs: Math.max(0, Math.round(performance.now() - startedAt))
+        }
       });
       return {
         content: [{ type: "text" as const, text: JSON.stringify(data) }],
@@ -70,16 +104,20 @@ export function createCompanyMcpServer(dependencies: CompanyMcpServerDependencie
       };
     } catch (error) {
       const permissionDenied = error instanceof PermissionDeniedError;
+      const reportingError = error instanceof ReportingQueryError;
       await dependencies.audit
         .record({
           userId: dependencies.actor.id,
           eventType: "mcp.tool_call",
-          resource,
+          resource: permissionDenied ? error.resource : resource,
           outcome: permissionDenied ? "denied" : "failure",
           messageId: dependencies.messageId ?? null,
           details: {
             toolName,
-            errorType: error instanceof Error ? error.name : "UnknownError"
+            ...auditOptions.details,
+            errorType: error instanceof Error ? error.name : "UnknownError",
+            ...(reportingError ? { rejectionCode: error.code } : {}),
+            durationMs: Math.max(0, Math.round(performance.now() - startedAt))
           }
         })
         .catch(() => undefined);
@@ -97,7 +135,7 @@ export function createCompanyMcpServer(dependencies: CompanyMcpServerDependencie
     }
   }
 
-  server.registerTool(
+  if (dependencies.reportsEnabled !== false) server.registerTool(
     "get_sales_summary",
     {
       title: "Satış özeti",
@@ -115,7 +153,7 @@ export function createCompanyMcpServer(dependencies: CompanyMcpServerDependencie
       }))
   );
 
-  server.registerTool(
+  if (dependencies.reportsEnabled !== false) server.registerTool(
     "get_active_projects",
     {
       title: "Aktif projeler",
@@ -128,16 +166,16 @@ export function createCompanyMcpServer(dependencies: CompanyMcpServerDependencie
       annotations: readOnlyAnnotations
     },
     async ({ limit, department }) =>
-      runTool("get_active_projects", async () => ({
+      runTool("get_active_projects", async (actor) => ({
         projects: (
           await dependencies.reports.getActiveProjects(
-            scopedListOptions(dependencies.actor, department, reportResources.projects, limit)
+            scopedListOptions(actor, department, reportResources.projects, limit)
           )
         ).map(({ id: _id, updatedAt: _updatedAt, ...project }) => project)
       }))
   );
 
-  server.registerTool(
+  if (dependencies.reportsEnabled !== false) server.registerTool(
     "get_overdue_tasks",
     {
       title: "Geciken görevler",
@@ -150,14 +188,148 @@ export function createCompanyMcpServer(dependencies: CompanyMcpServerDependencie
       annotations: readOnlyAnnotations
     },
     async ({ limit, department }) =>
-      runTool("get_overdue_tasks", async () => ({
+      runTool("get_overdue_tasks", async (actor) => ({
         tasks: (
           await dependencies.reports.getOverdueTasks(
-            scopedListOptions(dependencies.actor, department, reportResources.tasks, limit)
+            scopedListOptions(actor, department, reportResources.tasks, limit)
           )
         ).map(({ id: _id, projectId: _projectId, updatedAt: _updatedAt, ...task }) => task)
       }))
   );
+
+  if (dependencies.reportingQueries) {
+    const relationPolicies = dependencies.reportingQueries.relationPolicies();
+    const policyByRelation = new Map(
+      relationPolicies.map((policy) => [policy.relation, policy])
+    );
+    const requireDatabaseExplorerRole = (actor: AuthorizedUser) => {
+      if (!databaseExplorerRoles.has(actor.role.toLowerCase())) {
+        throw new PermissionDeniedError(reportResources.databaseExplore);
+      }
+    };
+    const accessibleRelations = async (actor: AuthorizedUser) => {
+      const allowedResources = await dependencies.authorization.allowedResources(
+        actor.id,
+        relationPolicies.map((policy) => policy.resource)
+      );
+      return new Set(
+        relationPolicies
+          .filter((policy) => allowedResources.has(policy.resource))
+          .map((policy) => policy.relation)
+      );
+    };
+
+    server.registerTool(
+      "describe_database",
+      {
+        title: "Veritabanı şemasını keşfet",
+        description:
+          `İzin verilen salt-okunur veritabanı görünümlerini ve güvenli alan adlarını sayfalar halinde listeler. İlk çağrıda cursor için null, devam sayfasında önceki sonucun nextCursor değerini kullan. Bir mesajda en fazla ${MAX_SCHEMA_DISCOVERY_CALLS_PER_MESSAGE} kez çağır; sonuçtaki tam schema.relation ve alan adlarını kullan.`,
+        inputSchema: reportingSchemaInputShape,
+        annotations: readOnlyAnnotations
+      },
+      async (input) =>
+        runTool("describe_database", async (actor) => {
+          requireDatabaseExplorerRole(actor);
+          return {
+            database: await dependencies.reportingQueries!.discoverSchema(
+              input,
+              await accessibleRelations(actor)
+            )
+          };
+        }, {
+          successDetails: (data) => ({
+            relationCount: data.database.relations.length,
+            hasNextPage: data.database.nextCursor !== null
+          })
+        })
+    );
+
+    server.registerTool(
+      "query_database",
+      {
+        title: "Veritabanını güvenli sorgula",
+        description:
+          "Keşfedilmiş tek bir salt-okunur ilişkiyi yapılandırılmış filtre, toplama, sıralama ve satır sınırıyla sorgular. SQL metni, join, alt sorgu veya yazma işlemi kabul etmez. Sadece describe_database sonucundaki adları kullan ve bu aracı mesaj başına en fazla bir kez çağır.",
+        inputSchema: reportingQueryInputShape,
+        annotations: readOnlyAnnotations
+      },
+      async (input) =>
+        {
+          const policy = policyByRelation.get(input.relation);
+          const policyColumns = new Set(policy?.columns ?? []);
+          const aggregateTargets = new Map(
+            input.aggregates.map((aggregate, index) => [aggregate.alias, `aggregate_${index}`])
+          );
+          const shape = {
+            relation: policy?.relation ?? "unmapped",
+            columns: input.columns.map((column) =>
+              policyColumns.has(column) ? column : "unmapped"
+            ),
+            filters: input.filters.map((filter) => ({
+              column: policyColumns.has(filter.column) ? filter.column : "unmapped",
+              operator: filter.operator,
+              valueCount: filter.operator === "in" ? filter.values.length : filter.value === null ? 0 : 1
+            })),
+            groupBy: input.group_by.map((column) =>
+              policyColumns.has(column) ? column : "unmapped"
+            ),
+            aggregates: input.aggregates.map((aggregate, index) => ({
+              position: index,
+              function: aggregate.function,
+              column:
+                aggregate.column && policyColumns.has(aggregate.column)
+                  ? aggregate.column
+                  : null
+            })),
+            orderBy: input.order_by.map((order) => ({
+              target: policyColumns.has(order.target)
+                ? order.target
+                : aggregateTargets.get(order.target) ?? "unmapped",
+              direction: order.direction
+            })),
+            limit: input.limit
+          };
+          return runTool("query_database", async (actor) => {
+            requireDatabaseExplorerRole(actor);
+            if (!policy) {
+              throw new ReportingQueryError("unknown_relation", "Relation is unavailable");
+            }
+            await dependencies.authorization.require(actor.id, policy.resource);
+            return {
+              result: await dependencies.reportingQueries!.query(
+                input,
+                new Set([policy.relation])
+              )
+            };
+          }, {
+            ...(policy ? { resource: policy.resource } : {}),
+            details: {
+              relation: policy?.relation ?? "unmapped",
+              queryShapeHash: createHash("sha256")
+                .update(JSON.stringify(shape))
+                .digest("hex")
+            },
+            successDetails: (data) => ({
+              rowCount: data.result.rowCount,
+              truncated: data.result.truncated,
+              selectedColumns: policy
+                ? input.columns.filter((column) => policy.columns.includes(column))
+                : [],
+              aggregates: policy
+                ? input.aggregates.map((aggregate) => ({
+                    function: aggregate.function,
+                    column:
+                      aggregate.column && policy.columns.includes(aggregate.column)
+                        ? aggregate.column
+                        : null
+                  }))
+                : []
+            })
+          });
+        }
+    );
+  }
 
   return server;
 }

@@ -11,5 +11,6 @@ export type PermissionAction = "read" | "write" | "approve";
 export const reportResources = {
   sales: "company.sales",
   projects: "company.projects",
-  tasks: "company.tasks"
+  tasks: "company.tasks",
+  databaseExplore: "company.database.explore"
 } as const;

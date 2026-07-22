@@ -99,15 +99,32 @@ Create a permanent token instead:
 
 ## 5. Render deployment checklist
 
-Fast path: the repo ships a `render.yaml` Blueprint (Render → New →
-Blueprint). It creates the database and the web service with migrations in
-`preDeployCommand`; generate the secret values with
-`npm run setup:env -- --render` and paste them into the dashboard. The manual
-checklist below applies either way.
+The repo ships a `render.yaml` infrastructure scaffold (Render → New →
+Blueprint). It creates the database and web service, but deliberately does not
+give the web runtime an owner URL or run migrations inside that service.
+Render service environment variables are shared by pre-deploy and runtime
+commands, while this app fail-closes if an admin URL reaches production.
+
+After Render creates the database, use its external owner connection only on a
+trusted workstation to run `npm run db:migrate`,
+`npm run db:provision-app-role -- --confirm-dedicated-database`, and
+`npm run db:provision-readonly -- --confirm-dedicated-database`. Then place only
+the two restricted URLs in Render as `DATABASE_URL` and
+`COMPANY_READONLY_DATABASE_URL`; never add `DATABASE_ADMIN_URL` to the web
+service. Those URLs must use the full external Render PostgreSQL hostname that
+matches the managed TLS certificate; do not assume an internal/private hostname
+works with `verify-full`. Generate the remaining values with
+`npm run setup:env -- --render`.
+The first web deploy may remain unhealthy until this bootstrap is complete.
 
 - [ ] `WHATSAPP_ENABLED=true`, `LLM_ENABLED` as desired. Set
       `LLM_GENERAL_CHAT_ENABLED=true` only on deployments that should answer
       general questions; it requires `LLM_ENABLED=true` and defaults to `false`.
+- [ ] Keep `LLM_SCHEMA_DISCOVERY_ENABLED=false` unless an admin/executive needs
+      schema-aware queries. When enabled, set `LLM_SCHEMA_ALLOWED_SCHEMAS` and
+      the reviewed `LLM_SCHEMA_RELATION_MANIFEST`, use a SELECT-only company
+      role, and grant the intended admin/executive both
+      `company.database.explore` and each mapped relation resource.
 - [ ] `WHATSAPP_ACCESS_TOKEN` — permanent System User token (§4).
 - [ ] `WHATSAPP_PHONE_NUMBER_ID` — the numeric ID from API Setup (not the
       phone number itself).
@@ -119,6 +136,8 @@ checklist below applies either way.
       token as above, subscribed to the **messages** field.
 - [ ] Database URLs, encryption/HMAC key rings, `SAFETY_IDENTIFIER_SECRET`
       set per `.env.example`.
+- [ ] Confirm the web service environment contains no `DATABASE_ADMIN_URL`,
+      `COMPANY_DATABASE_ADMIN_URL`, owner password, or provisioning password.
 - [ ] Migrations applied (`npm run db:migrate:prod`) and each tester added
       with `npm run db:add-user`.
 - [ ] After deploy, check the boot logs for
@@ -193,6 +212,26 @@ standalone and point a locally running service at it.
   company facts still require the permission-filtered read-only tools. Leave
   it `false` on report-only deployments. General turns are audited as
   `assistant.conversation`, separately from `company.report_request` events.
+- `LLM_SCHEMA_DISCOVERY_ENABLED=true` adds schema discovery plus a constrained
+  query DSL for permitted admin/executive users. It never executes model SQL:
+  the server allowlists discovered relations/columns, parameterizes values,
+  permits one bounded query per message, and enforces read-only transactions,
+  timeouts, concurrency, row, cell, and byte limits. Only manifest-approved
+  views and scalar columns are visible; public/system schemas, tables, foreign
+  tables, JSON/binary/custom types, and unmapped columns are rejected. For a non-standard
+  PostgreSQL database, set `COMPANY_REPORTS_ENABLED=false` only after the
+  SELECT-only role, allowed schemas, relation manifest, per-relation permission,
+  and view query cost have been reviewed. With `allowUnfiltered=false`, provide
+  selective/indexed `filterColumns`; only equality, range, IN, or a three-character
+  prefix on one of those columns satisfies the guard. Keep it false unless a
+  view is demonstrably small or already aggregated.
+- Treat the manifest and every view definition as a human-reviewed trust
+  boundary. Direct foreign relations are rejected, but the runtime cannot prove
+  that a normal view does not wrap an FDW, call a volatile/security-definer
+  function, expose unintended semantics, or contain an unexpectedly expensive
+  plan. Prefer a dedicated reporting/export database; review dependencies and
+  query plans, and keep view/schema DDL ownership unavailable to application,
+  source-system, and read-only runtime roles.
 - `npm run db:whitelist-batch -- --file users.json` — onboard many users in
   one atomic transaction (all rows validated first; the error names the bad
   row). Same fields as `db:add-user`.

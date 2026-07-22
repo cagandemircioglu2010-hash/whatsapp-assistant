@@ -37,6 +37,7 @@ export type WhitelistCrypto = {
 };
 
 const allowedResources = new Set<string>(Object.values(reportResources));
+const relationResourcePattern = /^company\.database\.relation\.[a-z][a-z0-9_.-]+$/;
 const allowedRoles = new Set(["employee", "manager", "executive", "admin"]);
 
 // Validates and normalizes one record. `label` is woven into error messages so
@@ -62,8 +63,24 @@ export function normalizeWhitelistUser(
   const locale = input.locale ?? null;
   if (locale !== null && locale !== "tr" && locale !== "en") throw new Error(`${label}: locale must be tr or en`);
   const permissions = (input.permissions ?? []).map((value) => value.trim()).filter(Boolean);
-  const invalid = permissions.find((resource) => !allowedResources.has(resource));
-  if (invalid) throw new Error(`${label}: permission "${invalid}" must be one of ${[...allowedResources].join(", ")}`);
+  const invalid = permissions.find(
+    (resource) => !allowedResources.has(resource) && !relationResourcePattern.test(resource)
+  );
+  if (invalid) {
+    throw new Error(
+      `${label}: permission "${invalid}" must be a known report permission or company.database.relation.*`
+    );
+  }
+  if (
+    permissions.some(
+      (resource) =>
+        resource === reportResources.databaseExplore || relationResourcePattern.test(resource)
+    ) &&
+    role !== "admin" &&
+    role !== "executive"
+  ) {
+    throw new Error(`${label}: ${reportResources.databaseExplore} requires the admin or executive role`);
+  }
   return { phoneE164, name, department, role, locale, permissions };
 }
 

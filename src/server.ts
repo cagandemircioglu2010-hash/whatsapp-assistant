@@ -32,7 +32,13 @@ if (config.nodeEnv === "production") {
       companyReadonlyPool,
       startupEncryption,
       startupIdentifiers,
-      startupAuditIntegrity
+      startupAuditIntegrity,
+      {
+        reportsEnabled: config.companyReportsEnabled,
+        schemaDiscoveryEnabled: config.llm.schemaDiscoveryEnabled,
+        allowedSchemas: config.llm.schemaAllowedSchemas,
+        relationManifest: config.llm.schemaRelationManifest
+      }
     );
   } finally {
     startupEncryption.destroy();
