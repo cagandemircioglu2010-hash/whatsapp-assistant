@@ -78,5 +78,10 @@
     "tsx": "^4.20.3",
     "typescript": "^5.8.3",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "@modelcontextprotocol/sdk": {
+      "@hono/node-server": "2.0.11"
+    }
   }
 }
