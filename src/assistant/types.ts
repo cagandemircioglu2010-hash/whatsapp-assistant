@@ -18,6 +18,9 @@ export type AssistantResponse = {
   resource: string | null;
   resources: string[];
   outcome: "success" | "denied" | "unsupported";
+  // Conversation responses use no company data tool and are audited
+  // separately from permission-checked business/report operations.
+  kind?: "business" | "conversation";
 };
 
 export interface AssistantResponder {

@@ -229,10 +229,18 @@ npm run db:list-access-requests -- --days 30 --full
 
 ```env
 LLM_ENABLED=true
+LLM_GENERAL_CHAT_ENABLED=true
 LLM_PROVIDER=gemini
 GEMINI_API_KEY=<google-ai-studio-api-key>
 GEMINI_MODEL=gemini-3.5-flash
 ```
+
+`LLM_GENERAL_CHAT_ENABLED=true` hibrit modu açar: genel bilgi, matematik, yazım,
+çeviri ve gündelik sohbet Gemini tarafından yanıtlanır; şirketle ilgili gerçekler
+ise yalnızca mevcut yetki kontrollü, salt-okunur rapor araçlarından alınır. Varsayılan
+değer `false` olduğundan mevcut dağıtımların davranışı bu seçenek açıkça etkinleştirilmedikçe değişmez.
+Hibrit modda önceki bot yanıtlarındaki şirket verileri modele yeniden verilmez;
+güncel yanıtlar her seferinde kullanıcının mevcut izinleriyle araçlardan tekrar alınır.
 
 Gemini ücretsiz katmanındaki istek ve yanıtlar Google ürünlerini iyileştirmek için kullanılabilir. OpenAI kullanmak
 için `LLM_PROVIDER=openai`, `OPENAI_API_KEY` ve `OPENAI_MODEL` ayarlanır.

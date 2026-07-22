@@ -7,7 +7,8 @@ export class FallbackAssistantResponder implements AssistantResponder {
   constructor(
     private readonly primary: AssistantResponder,
     private readonly fallback: AssistantResponder,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly unsupportedFallbackText?: string | ((user: AuthorizedUser) => string)
   ) {}
 
   async handle(
@@ -24,7 +25,13 @@ export class FallbackAssistantResponder implements AssistantResponder {
         { error, userId: user.id, messageId: context.messageId },
         "LLM assistant failed; using deterministic fallback"
       );
-      return this.fallback.handle(user, incomingText, context);
+      const response = await this.fallback.handle(user, incomingText, context);
+      if (response.outcome !== "unsupported" || !this.unsupportedFallbackText) return response;
+      const text =
+        typeof this.unsupportedFallbackText === "function"
+          ? this.unsupportedFallbackText(user)
+          : this.unsupportedFallbackText;
+      return { ...response, text };
     }
   }
 }

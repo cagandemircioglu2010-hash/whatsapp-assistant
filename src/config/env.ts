@@ -99,6 +99,7 @@ const schema = z
       .transform((value) => value === "true"),
     WHATSAPP_DEBUG_LOGGING: booleanFromString,
     LLM_ENABLED: booleanFromString,
+    LLM_GENERAL_CHAT_ENABLED: booleanFromString,
     LLM_PROVIDER: z.enum(["openai", "gemini"]).default("openai"),
     OPENAI_API_KEY: z.string().optional(),
     OPENAI_MODEL: z.string().min(1).default("gpt-5.6-terra"),
@@ -429,6 +430,13 @@ const schema = z
         message: `${selectedLlmApiKeyName} is required when LLM_ENABLED=true`
       });
     }
+    if (env.LLM_GENERAL_CHAT_ENABLED && !env.LLM_ENABLED) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["LLM_GENERAL_CHAT_ENABLED"],
+        message: "LLM_GENERAL_CHAT_ENABLED requires LLM_ENABLED=true"
+      });
+    }
     if (env.LLM_ENABLED && env.NODE_ENV === "production" && (selectedLlmApiKey?.length ?? 0) < 20) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -502,6 +510,7 @@ export type AppConfig = {
   };
   llm: {
     enabled: boolean;
+    generalChatEnabled: boolean;
     provider: "openai" | "gemini";
     apiKey?: string;
     model: string;
@@ -577,6 +586,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     },
     llm: {
       enabled: env.LLM_ENABLED,
+      generalChatEnabled: env.LLM_GENERAL_CHAT_ENABLED,
       provider: env.LLM_PROVIDER,
       ...(env.LLM_PROVIDER === "gemini"
         ? env.GEMINI_API_KEY

@@ -133,4 +133,79 @@ describe("Gemini native generateContent gateway", () => {
     );
     expect((init?.headers as Record<string, string>).Authorization).toBeUndefined();
   });
+
+  it("omits function-calling fields when a user has no authorized tools", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { role: "model", parts: [{ text: "Merhaba!" }] } }]
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+    const gateway = new GeminiChatCompletionsGateway({
+      apiKey: "AQ.secret",
+      model: "gemini-3.5-flash",
+      maxOutputTokens: 500,
+      timeoutMs: 5_000
+    });
+
+    const turn = await gateway.createTurn({
+      instructions: "Answer general questions safely.",
+      inputItems: [{ role: "user", content: [{ type: "input_text", text: "Merhaba" }] }],
+      tools: [],
+      safetyIdentifier: "identifier"
+    });
+
+    expect(turn.outputText).toBe("Merhaba!");
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("tools");
+    expect(body).not.toHaveProperty("toolConfig");
+  });
+
+  it.each([401, 429, 500])("surfaces Gemini HTTP %i failures for safe fallback", async (status) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("provider failure", { status }));
+    const gateway = new GeminiChatCompletionsGateway({
+      apiKey: "AQ.secret",
+      model: "gemini-3.5-flash",
+      maxOutputTokens: 500,
+      timeoutMs: 5_000
+    });
+
+    await expect(
+      gateway.createTurn({
+        instructions: "Answer safely.",
+        inputItems: [{ role: "user", content: [{ type: "input_text", text: "Merhaba" }] }],
+        tools: [],
+        safetyIdentifier: "identifier"
+      })
+    ).rejects.toThrow(`status ${status}`);
+  });
+
+  it("surfaces network and safety-block failures for safe fallback", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock.mockRejectedValueOnce(new TypeError("network unavailable"));
+    const gateway = new GeminiChatCompletionsGateway({
+      apiKey: "AQ.secret",
+      model: "gemini-3.5-flash",
+      maxOutputTokens: 500,
+      timeoutMs: 5_000
+    });
+    const request = {
+      instructions: "Answer safely.",
+      inputItems: [{ role: "user", content: [{ type: "input_text", text: "Merhaba" }] }],
+      tools: [],
+      safetyIdentifier: "identifier"
+    };
+
+    await expect(gateway.createTurn(request)).rejects.toThrow("network unavailable");
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ promptFeedback: { blockReason: "SAFETY" } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+    await expect(gateway.createTurn(request)).rejects.toThrow("SAFETY");
+  });
 });

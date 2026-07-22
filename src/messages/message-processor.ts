@@ -483,7 +483,10 @@ export class MessageProcessor {
             });
       await this.options.audit.record({
         userId: queued.user.id,
-        eventType: "company.report_request",
+        eventType:
+          command.kind === "conversation"
+            ? "assistant.conversation"
+            : "company.report_request",
         resource: command.resource,
         outcome: command.outcome === "success" ? "success" : command.outcome === "denied" ? "denied" : "ignored",
         messageId: queued.storedId,
