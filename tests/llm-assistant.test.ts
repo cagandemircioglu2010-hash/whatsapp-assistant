@@ -213,6 +213,35 @@ describe("LLM company assistant", () => {
     expect(gateway.requests[0]?.instructions).toContain("Genel sorular için şirket araçlarını çağırma");
   });
 
+  it("returns the hybrid capability menu without spending a provider request", async () => {
+    const gateway = new DirectAnswerGateway("unused");
+    const sessions = new FakeSessionFactory();
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions,
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "menu-user", department: null, role: "employee" },
+      " MENÜ! ",
+      { messageId: "message-menu" }
+    );
+
+    expect(result).toEqual({
+      text: "Genel sohbet, bilgi, matematik, yazım ve çeviri sorularını yanıtlayabilirim. Yetkinize göre ayrıca “satış özeti”, “aktif projeler” ve “geciken görevler” sorgularını çalıştırabilirim.",
+      resource: null,
+      resources: [],
+      outcome: "success",
+      kind: "conversation"
+    });
+    expect(gateway.requests).toHaveLength(0);
+    expect(sessions.actorId).toBeNull();
+  });
+
   it("preserves the company-only outcome when hybrid mode is disabled", async () => {
     const gateway = new DirectAnswerGateway("Bu asistan yalnızca şirket bilgisi verir.");
     const sessions = new FakeSessionFactory();
