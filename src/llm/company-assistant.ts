@@ -105,6 +105,17 @@ function isCompanyToolName(name: string): name is CompanyToolName {
   return Object.hasOwn(companyToolResources, name);
 }
 
+function isMenuCommand(value: string): boolean {
+  const command = value.toLocaleLowerCase("tr-TR").replace(/[.!?]+$/u, "").trim();
+  return command === "menü" || command === "menu";
+}
+
+function hybridMenuText(user: AuthorizedUser): string {
+  return user.locale === "en"
+    ? "I can help with general questions, knowledge, math, writing, and translation. Depending on your permissions, I can also run “sales summary”, “active projects”, and “overdue tasks” queries."
+    : "Genel sohbet, bilgi, matematik, yazım ve çeviri sorularını yanıtlayabilirim. Yetkinize göre ayrıca “satış özeti”, “aktif projeler” ve “geciken görevler” sorgularını çalıştırabilirim.";
+}
+
 export class CompanyLlmAssistant implements AssistantResponder {
   constructor(private readonly options: CompanyLlmAssistantOptions) {}
 
@@ -124,6 +135,15 @@ export class CompanyLlmAssistant implements AssistantResponder {
         resources: [],
         outcome: "unsupported",
         ...(this.options.generalChatEnabled ? { kind: "conversation" as const } : {})
+      };
+    }
+    if (this.options.generalChatEnabled && isMenuCommand(sanitizedIncomingText)) {
+      return {
+        text: hybridMenuText(user),
+        resource: null,
+        resources: [],
+        outcome: "success",
+        kind: "conversation"
       };
     }
     const session = await this.options.sessions.open(user, context);
