@@ -15,7 +15,7 @@
     "start:admin": "node dist/src/admin/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage --no-file-parallelism",
     "test:stress": "vitest run tests/stress.test.ts",
     "test:watch": "vitest",
     "check": "npm run typecheck && npm run test:coverage && npm run build",

@@ -36,6 +36,7 @@ button, input, select { font: inherit; }
 a { color: inherit; }
 .shell { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 42px 0 64px; }
 .topbar { display: flex; justify-content: space-between; gap: 24px; align-items: flex-end; margin-bottom: 26px; }
+.top-actions { display: flex; flex: none; align-items: center; gap: 9px; }
 .eyebrow { margin: 0 0 7px; color: var(--brand); font-size: 12px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
 h1 { margin: 0; font-size: clamp(28px, 5vw, 46px); line-height: 1.03; letter-spacing: -.045em; }
 .subtitle { max-width: 650px; margin: 12px 0 0; color: var(--muted); line-height: 1.55; }
@@ -52,7 +53,7 @@ h1 { margin: 0; font-size: clamp(28px, 5vw, 46px); line-height: 1.03; letter-spa
 .field { display: grid; gap: 7px; margin-bottom: 15px; }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 label, legend { font-size: 13px; font-weight: 750; }
-input[type="text"], input[type="tel"], select {
+input[type="text"], input[type="tel"], input[type="password"], select {
   width: 100%; min-height: 44px; border: 1px solid #cbd9d4; border-radius: 10px; padding: 10px 12px;
   color: var(--ink); background: #fff; outline: none;
 }
@@ -67,6 +68,14 @@ fieldset { border: 0; padding: 0; margin: 18px 0; }
 }
 .primary { width: 100%; min-height: 46px; color: #fff; background: var(--brand); }
 .primary:hover { background: var(--brand-dark); }
+.logout { border: 1px solid #c7ded6; border-radius: 99px; padding: 7px 11px; color: var(--brand-dark); background: #fff; cursor: pointer; font-size: 12px; font-weight: 750; }
+.logout:hover { background: #edf7f3; }
+.login-shell { width: min(460px, calc(100% - 28px)); margin: 0 auto; padding: max(56px, 12vh) 0 64px; }
+.login-card { border: 1px solid var(--line); border-radius: 20px; padding: 28px; background: var(--paper); box-shadow: 0 22px 65px rgba(31, 65, 57, .11); }
+.login-card h1 { font-size: clamp(30px, 8vw, 42px); }
+.login-card .subtitle { margin-bottom: 22px; }
+.login-card .field { margin-bottom: 18px; }
+.login-card .footer { margin-bottom: 0; }
 .users { padding: 8px 18px 18px; }
 .empty { margin: 12px 6px 4px; border: 1px dashed #c9d8d3; border-radius: 12px; padding: 30px 18px; text-align: center; color: var(--muted); }
 .user { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; padding: 17px 6px; border-bottom: 1px solid var(--line); }
@@ -88,6 +97,7 @@ fieldset { border: 0; padding: 0; margin: 18px 0; }
 @media (max-width: 850px) {
   .grid { grid-template-columns: 1fr; }
   .topbar { align-items: flex-start; flex-direction: column; }
+  .top-actions { width: 100%; justify-content: space-between; }
 }
 @media (max-width: 540px) {
   .shell { width: min(100% - 20px, 1180px); padding-top: 24px; }
@@ -122,6 +132,44 @@ function resultNotice(result: string | undefined): string {
   return message
     ? `<div class="notice success" role="status">${escapeHtml(message)}</div>`
     : "";
+}
+
+export function renderLoginPage(input: {
+  csrfToken: string;
+  error?: string | undefined;
+}): string {
+  const error = input.error
+    ? `<div class="notice error" role="alert">${escapeHtml(input.error)}</div>`
+    : "";
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <title>Sign in · Whitelist administration</title>
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+  <main class="login-shell">
+    <section class="login-card" aria-labelledby="login-title">
+      <p class="eyebrow">WhatsApp assistant</p>
+      <h1 id="login-title">Admin sign in</h1>
+      <p class="subtitle">Enter the password stored in Render as <strong>WHITELIST_ADMIN_PASSWORD</strong>.</p>
+      ${error}
+      <form method="post" action="/login">
+        <input type="hidden" name="csrf" value="${escapeHtml(input.csrfToken)}">
+        <div class="field">
+          <label for="password">Admin password</label>
+          <input id="password" name="password" type="password" minlength="32" maxlength="512" autocomplete="current-password" autofocus required>
+        </div>
+        <button class="primary" type="submit">Sign in securely</button>
+      </form>
+      <p class="footer">The app does not place the password in browser storage. Your session is protected by a secure, HTTP-only cookie.</p>
+    </section>
+  </main>
+</body>
+</html>`;
 }
 
 function userCard(user: AdminWhitelistUser, csrfToken: string): string {
@@ -187,7 +235,13 @@ export function renderAdminPage(input: {
         <h1>Whitelist administration</h1>
         <p class="subtitle">Add approved testers, choose exactly what company information they can access, and suspend access without deleting audit history.</p>
       </div>
-      <div class="secure">Admin connection</div>
+      <div class="top-actions">
+        <div class="secure">Admin connection</div>
+        <form method="post" action="/logout">
+          <input type="hidden" name="csrf" value="${escapeHtml(input.csrfToken)}">
+          <button class="logout" type="submit">Sign out</button>
+        </form>
+      </div>
     </header>
     ${resultNotice(input.result)}
     ${error}

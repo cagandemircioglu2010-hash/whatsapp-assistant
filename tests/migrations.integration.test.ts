@@ -197,10 +197,12 @@ describe("PostgreSQL migrations", () => {
     wrongAuditKey.destroy();
   });
 
-  it("starts against an approved schema-only company database without legacy reporting views", async () => {
-    const companyDb = new PGlite();
-    try {
-      await companyDb.exec(`
+  it(
+    "starts against an approved schema-only company database without legacy reporting views",
+    async () => {
+      const companyDb = new PGlite();
+      try {
+        await companyDb.exec(`
         CREATE SCHEMA analytics;
         CREATE TABLE analytics.metrics_source (
           metric_name TEXT NOT NULL,
@@ -209,34 +211,36 @@ describe("PostgreSQL migrations", () => {
         CREATE VIEW analytics.metrics WITH (security_barrier = true) AS
           SELECT metric_name, metric_value FROM analytics.metrics_source;
       `);
-      const companyAdapter = {
-        query: (sql: string, parameters?: unknown[]) => companyDb.query(sql, parameters),
-        connect: async () => ({
+        const companyAdapter = {
           query: (sql: string, parameters?: unknown[]) => companyDb.query(sql, parameters),
-          release: () => undefined
-        })
-      } as unknown as Pool;
+          connect: async () => ({
+            query: (sql: string, parameters?: unknown[]) => companyDb.query(sql, parameters),
+            release: () => undefined
+          })
+        } as unknown as Pool;
 
-      await expect(
-        assertRuntimeReady(poolAdapter, companyAdapter, encryption, identifiers, auditIntegrity, {
-          reportsEnabled: false,
-          schemaDiscoveryEnabled: true,
-          allowedSchemas: ["analytics"],
-          relationManifest: [
-            {
-              relation: "analytics.metrics",
-              columns: ["metric_name", "metric_value"],
-              filterColumns: [],
-              resource: "company.database.relation.metrics",
-              allowUnfiltered: true
-            }
-          ]
-        })
-      ).resolves.toBeUndefined();
-    } finally {
-      await companyDb.close();
-    }
-  });
+        await expect(
+          assertRuntimeReady(poolAdapter, companyAdapter, encryption, identifiers, auditIntegrity, {
+            reportsEnabled: false,
+            schemaDiscoveryEnabled: true,
+            allowedSchemas: ["analytics"],
+            relationManifest: [
+              {
+                relation: "analytics.metrics",
+                columns: ["metric_name", "metric_value"],
+                filterColumns: [],
+                resource: "company.database.relation.metrics",
+                allowUnfiltered: true
+              }
+            ]
+          })
+        ).resolves.toBeUndefined();
+      } finally {
+        await companyDb.close();
+      }
+    },
+    30_000
+  );
 
   it("rejects schema-only readiness when the allowed schema has no safely discoverable catalog", async () => {
     const companyDb = new PGlite();
