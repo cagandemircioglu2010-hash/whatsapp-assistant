@@ -471,6 +471,43 @@ describe("LLM company assistant", () => {
     expect(sessions.session.calls).toEqual([]);
   });
 
+  it.each([
+    ["Satışlar nasıl?", "Bunu şirket verilerinize göre mi, yoksa genel olarak mı soruyorsunuz?"],
+    ["Stock status?", "Do you mean according to your company data, or are you asking generally?"]
+  ])("asks for clarification without an LLM or company session: %s", async (prompt, text) => {
+    const gateway = new DirectAnswerGateway("unused");
+    const sessions = new FakeSessionFactory();
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions,
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      {
+        id: "uncertain-intent-user",
+        department: null,
+        role: "employee",
+        ...(prompt.startsWith("Stock") ? { locale: "en" as const } : {})
+      },
+      prompt,
+      { messageId: "message-uncertain-intent" }
+    );
+
+    expect(result).toEqual({
+      text,
+      resource: null,
+      resources: [],
+      outcome: "unsupported",
+      kind: "business"
+    });
+    expect(gateway.requests).toHaveLength(0);
+    expect(sessions.actorId).toBeNull();
+  });
+
   it("rejects model prose when a successful company call is mixed with a denial", async () => {
     const calls: Array<{ name: string; arguments_: Record<string, unknown> }> = [];
     const session: CompanyMcpSession = {
