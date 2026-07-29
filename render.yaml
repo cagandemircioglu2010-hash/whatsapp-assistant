@@ -97,6 +97,10 @@ services:
       # LLM_SCHEMA_RELATION_MANIFEST explicitly for any other database schema.
       - key: LLM_PROVIDER
         sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ANTHROPIC_MODEL
+        value: claude-sonnet-5
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL

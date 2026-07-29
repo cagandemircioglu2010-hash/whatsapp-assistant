@@ -32,5 +32,8 @@ describe("Render environment generator", () => {
     expect(keys.has("DATABASE_URL")).toBe(true);
     expect(keys.has("COMPANY_READONLY_DATABASE_URL")).toBe(true);
     expect(keys.has("LLM_SCHEMA_RELATION_MANIFEST")).toBe(true);
+    expect(keys.has("ANTHROPIC_API_KEY")).toBe(true);
+    expect(stdout).toContain("LLM_PROVIDER=anthropic");
+    expect(stdout).toContain("ANTHROPIC_MODEL=claude-sonnet-5");
   });
 });

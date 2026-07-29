@@ -848,6 +848,101 @@ describe("LLM company assistant", () => {
     expect(gateway.requests[0]?.instructions).toContain("geçmişi yalnızca o iletideki eksik göndergeleri çözmek için kullan");
   });
 
+  it("resolves a company-data scope answer against the previous user request and refetches data", async () => {
+    const gateway = new TwoTurnGateway();
+    const sessions = new FakeSessionFactory();
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions,
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "scope-user", department: "Sales", role: "employee" },
+      "şirket verileri",
+      {
+        messageId: "message-scope",
+        history: [
+          { direction: "inbound", text: "tamam satışları topla ve ciroyu hesapla" },
+          { direction: "outbound", text: "Bunu şirket verilerinize göre mi soruyorsunuz?" }
+        ]
+      }
+    );
+
+    expect(result).toMatchObject({ outcome: "success", kind: "business" });
+    expect(result.text).toContain("25.000 TL");
+    expect(sessions.session.calls).toHaveLength(1);
+    const providerInput = JSON.stringify(gateway.requests[0]?.inputItems.at(-1));
+    expect(providerInput).toContain("satışları topla ve ciroyu hesapla");
+    expect(providerInput).toContain("Şirket verileri");
+    expect(providerInput).not.toContain("Bunu şirket verilerinize göre mi");
+  });
+
+  it("resolves a revenue follow-up against the latest substantive inbound request", async () => {
+    const gateway = new TwoTurnGateway();
+    const sessions = new FakeSessionFactory();
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions,
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "follow-up-user", department: "Sales", role: "employee" },
+      "ve ciroyu hesapla",
+      {
+        messageId: "message-follow-up",
+        history: [
+          { direction: "inbound", text: "şirket verilerinden satışları bul" },
+          { direction: "outbound", text: "2 satış bulundu." },
+          { direction: "inbound", text: "şirket verileri" },
+          { direction: "outbound", text: "Satış özeti hazır." }
+        ]
+      }
+    );
+
+    expect(result).toMatchObject({ outcome: "success", kind: "business" });
+    expect(result.text).toContain("25.000 TL");
+    expect(sessions.session.calls).toHaveLength(1);
+    const providerInput = JSON.stringify(gateway.requests[0]?.inputItems.at(-1));
+    expect(providerInput).toContain("şirket verilerinden satışları bul");
+    expect(providerInput).toContain("ve ciroyu hesapla");
+    expect(providerInput).not.toContain("2 satış bulundu");
+  });
+
+  it("asks for the desired dataset when a bare company-data scope has no prior request", async () => {
+    const gateway = new DirectAnswerGateway("unused");
+    const sessions = new FakeSessionFactory();
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions,
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "bare-scope-user", department: null, role: "employee" },
+      "şirket verileri",
+      { messageId: "message-bare-scope" }
+    );
+
+    expect(result).toMatchObject({
+      outcome: "success",
+      kind: "conversation",
+      text: "Hangi şirket verisini istersiniz: satışlar, projeler veya geciken görevler?"
+    });
+    expect(gateway.requests).toHaveLength(0);
+    expect(sessions.session.calls).toHaveLength(0);
+  });
+
   it("does not replay protected outbound history in report-only mode", async () => {
     const gateway = new DirectAnswerGateway("It was 999,999 TRY.");
     const assistant = new CompanyLlmAssistant({

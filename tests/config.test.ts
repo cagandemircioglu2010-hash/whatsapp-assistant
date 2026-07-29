@@ -91,6 +91,31 @@ describe("application configuration", () => {
       apiKey: "gemini-test-key",
       model: "gemini-3.5-flash"
     });
+    expect(() =>
+      loadConfig({
+        ...baseEnvironment,
+        LLM_ENABLED: "true",
+        LLM_PROVIDER: "anthropic",
+        SAFETY_IDENTIFIER_SECRET: "s".repeat(32)
+      })
+    ).toThrow("ANTHROPIC_API_KEY");
+    expect(
+      loadConfig({
+        ...baseEnvironment,
+        LLM_ENABLED: "true",
+        LLM_PROVIDER: "anthropic",
+        ANTHROPIC_API_KEY: "anthropic-test-key",
+        ANTHROPIC_MODEL: "claude-sonnet-5",
+        LLM_GENERAL_CHAT_ENABLED: "true",
+        SAFETY_IDENTIFIER_SECRET: "s".repeat(32)
+      }).llm
+    ).toMatchObject({
+      enabled: true,
+      generalChatEnabled: true,
+      provider: "anthropic",
+      apiKey: "anthropic-test-key",
+      model: "claude-sonnet-5"
+    });
     expect(
       loadConfig({
         ...baseEnvironment,

@@ -83,6 +83,7 @@ describe("HTTP application hardening", () => {
     expect(service.body).toContain("WhatsApp Company Assistant");
     expect(privacy.statusCode).toBe(200);
     expect(privacy.body).toContain("Privacy Policy");
+    expect(privacy.body).toContain("Anthropic Claude");
     expect(privacy.body).toContain("Google Gemini");
     expect(deletion.statusCode).toBe(200);
     expect(deletion.body).toContain("Data Deletion Instructions");

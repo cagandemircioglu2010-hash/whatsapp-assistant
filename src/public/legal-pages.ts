@@ -27,7 +27,7 @@ export const privacyPolicyPage = `<!doctype html>
   <body>
     <main>
       <h1>Privacy Policy</h1>
-      <p>Last updated: July 19, 2026</p>
+      <p>Last updated: July 29, 2026</p>
       <p>This policy explains how the WhatsApp Company Assistant processes information when an authorized user communicates with the service.</p>
 
       <h2>Information we process</h2>
@@ -42,7 +42,7 @@ export const privacyPolicyPage = `<!doctype html>
       <p>We use information only to authenticate authorized users, answer company reporting requests, deliver WhatsApp replies, prevent abuse, troubleshoot failures, maintain security, and meet audit obligations. We do not sell personal information or use it for advertising.</p>
 
       <h2>Service providers</h2>
-      <p>Information may be processed by Meta through the WhatsApp Cloud API, Render for application hosting, Google Gemini for response generation, and the database providers used by the service. These providers process information only as needed to operate the assistant.</p>
+      <p>Information may be processed by Meta through the WhatsApp Cloud API, Render for application hosting, the configured language-model provider (Anthropic Claude, Google Gemini, or OpenAI) for response generation, and the database providers used by the service. These providers process information only as needed to operate the assistant.</p>
 
       <h2>Retention and security</h2>
       <p>Message content is normally retained for up to 30 days, message records for up to 90 days, and security or audit records for up to 365 days. Records may be retained longer when required for security, legal compliance, or an active legal hold. The service uses access controls, encryption, redacted logs, signed webhook verification, and read-only reporting access.</p>
