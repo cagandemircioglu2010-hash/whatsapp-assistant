@@ -11,6 +11,7 @@ import type {
   McpToolDescriptor,
   McpToolResult
 } from "../mcp/session.js";
+import { classifyMessageIntent } from "./intent-classifier.js";
 import type { LlmFunctionTool, LlmGateway } from "./types.js";
 
 type CompanyLlmAssistantOptions = {
@@ -237,49 +238,6 @@ function schemaInspectionRequested(value: string): boolean {
   );
 }
 
-function companyDataRequested(value: string): boolean {
-  const normalized = value
-    .toLocaleLowerCase("tr-TR")
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replaceAll("ı", "i");
-  const explicitCompanyContext =
-    /\b(?:our|my|bizim)\s+(?:company|sirket\w*|sales?|satis\w*|revenue|gelir\w*|projects?|proje\w*|tasks?|gorev\w*|customers?|musteri\w*|departments?|departman\w*|reports?|rapor\w*|kpis?|metrics?|metrik\w*|conversion\w*|database|veritabani\w*)\b/.test(
-      normalized
-    ) ||
-    /\b(?:sirket(?:imiz|imizin|imin|in)|company'?s|demo\s+database|company\s+database|veritabani(?:miz|mizin|ndaki|nda|ndan|ni|nı))\b/.test(
-      normalized
-    );
-  const fixedReportRequest =
-    /\b(satis\w*\s+ozet\w*|sales\s+summar(?:y|ies)|aktif\w*\s+proje\w*|active\s+projects?|gecik\w*\s+gorev\w*|overdue\s+tasks?)\b/.test(
-      normalized
-    );
-  const genericKnowledgeRequest =
-    /\b(translate|translation|cevir\w*|write|compose|yaz\w*|explain|acikla\w*|define|definition)\b/.test(
-      normalized
-    ) || /\b(what is|what does|ne demek|nedir)\b/.test(normalized);
-  if (genericKnowledgeRequest && !explicitCompanyContext) return false;
-
-  const businessSubject =
-    /\b(satis\w*|sales|gelir\w*|revenue|ciro\w*|kar|profit|kazanc\w*|earnings?|proje\w*|projects?|gorev\w*|tasks?|musteri\w*|customers?|fatura\w*|invoices?|departman\w*|departments?|kpi|metrik\w*|metrics?|rapor\w*|reports?)\b/.test(
-      normalized
-    );
-  const dataQualifier =
-    /\b(bu\s+(?:ay|hafta|yil)|this\s+(?:month|week|year)|today|current|latest|son\w*|aktif\w*|active|gecik\w*|overdue|odenmem\w*|unpaid|toplam\w*|total|amount|count|kac|how\s+(?:many|much)|ne\s+kadar|liste\w*|list|show|goster\w*|durum\w*|status|analiz\w*|analy[sz]e|iyilestir\w*|improve|art\w*|azal\w*|compare|karsilastir\w*)\b/.test(
-      normalized
-    );
-  const implicitCompanyPerformance =
-    /\b(?:bu\s+(?:ay|hafta|yil)\s+)?ne\s+kadar\s+kazandik\b/.test(normalized) ||
-    /\b(?:how\s+much\s+did\s+we\s+make|did\s+we\s+make\s+(?:a\s+)?profit)\b/.test(normalized) ||
-    /\b(?:islerimiz\s+nasil\s+gidiyor|how\s+is\s+business\s+going)\b/.test(normalized);
-  return (
-    explicitCompanyContext ||
-    fixedReportRequest ||
-    implicitCompanyPerformance ||
-    (businessSubject && dataQualifier)
-  );
-}
-
 const GROUNDING_STOP_WORDS = new Set([
   "and", "the", "this", "that", "with", "from", "have", "has", "was", "were", "are",
   "bir", "ile", "icin", "olan", "olarak", "daha", "son", "toplam", "gore", "var", "yok"
@@ -472,6 +430,9 @@ export class CompanyLlmAssistant implements AssistantResponder {
         ...(this.options.generalChatEnabled ? { kind: "conversation" as const } : {})
       };
     }
+    const intent = this.options.generalChatEnabled
+      ? classifyMessageIntent(sanitizedIncomingText, context.history)
+      : null;
     if (
       this.options.generalChatEnabled &&
       (isMenuCommand(sanitizedIncomingText) || isCapabilityCommand(sanitizedIncomingText))
@@ -488,6 +449,18 @@ export class CompanyLlmAssistant implements AssistantResponder {
         kind: "conversation"
       };
     }
+    if (intent?.intent === "uncertain") {
+      return {
+        text:
+          user.locale === "en"
+            ? "Do you mean according to your company data, or are you asking generally?"
+            : "Bunu şirket verilerinize göre mi, yoksa genel olarak mı soruyorsunuz?",
+        resource: null,
+        resources: [],
+        outcome: "unsupported",
+        kind: "business"
+      };
+    }
     const session = await this.options.sessions.open(user, context);
     const resources = new Set<string>();
     let successfulDataCalls = 0;
@@ -502,9 +475,7 @@ export class CompanyLlmAssistant implements AssistantResponder {
     const discoveredRelations = new Map<string, DiscoveredRelation>();
     const groundingEvidence: string[] = [];
     const explicitSchemaInspection = schemaInspectionRequested(sanitizedIncomingText);
-    const companyDataTurn = this.options.generalChatEnabled
-      ? companyDataRequested(sanitizedIncomingText)
-      : true;
+    const companyDataTurn = intent?.intent === "company_data" || !this.options.generalChatEnabled;
     const seenCallIds = new Set<string>();
 
     try {
