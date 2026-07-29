@@ -244,7 +244,7 @@ function companyDataRequested(value: string): boolean {
     .replace(/[\u0300-\u036f]/g, "")
     .replaceAll("ı", "i");
   const explicitCompanyContext =
-    /\b(?:our|my|bizim)\s+(?:company|sirket\w*|sales?|satis\w*|revenue|gelir\w*|projects?|proje\w*|tasks?|gorev\w*|customers?|musteri\w*|departments?|departman\w*|reports?|rapor\w*|kpis?|metrics?|metrik\w*|database|veritabani\w*)\b/.test(
+    /\b(?:our|my|bizim)\s+(?:company|sirket\w*|sales?|satis\w*|revenue|gelir\w*|projects?|proje\w*|tasks?|gorev\w*|customers?|musteri\w*|departments?|departman\w*|reports?|rapor\w*|kpis?|metrics?|metrik\w*|conversion\w*|database|veritabani\w*)\b/.test(
       normalized
     ) ||
     /\b(?:sirket(?:imiz|imizin|imin|in)|company'?s|demo\s+database|company\s+database|veritabani(?:miz|mizin|ndaki|nda|ndan|ni|nı))\b/.test(
@@ -261,55 +261,22 @@ function companyDataRequested(value: string): boolean {
   if (genericKnowledgeRequest && !explicitCompanyContext) return false;
 
   const businessSubject =
-    /\b(satis\w*|sales|gelir\w*|revenue|ciro\w*|proje\w*|projects?|gorev\w*|tasks?|musteri\w*|customers?|departman\w*|departments?|kpi|metrik\w*|metrics?|rapor\w*|reports?)\b/.test(
+    /\b(satis\w*|sales|gelir\w*|revenue|ciro\w*|kar|profit|kazanc\w*|earnings?|proje\w*|projects?|gorev\w*|tasks?|musteri\w*|customers?|fatura\w*|invoices?|departman\w*|departments?|kpi|metrik\w*|metrics?|rapor\w*|reports?)\b/.test(
       normalized
     );
   const dataQualifier =
-    /\b(bu\s+(?:ay|hafta|yil)|today|current|latest|son\w*|aktif\w*|active|gecik\w*|overdue|toplam\w*|total|amount|count|kac|ne\s+kadar|liste\w*|list|show|goster\w*|durum\w*|status|analiz\w*|analy[sz]e|iyilestir\w*|improve|art\w*|azal\w*|compare|karsilastir\w*)\b/.test(
+    /\b(bu\s+(?:ay|hafta|yil)|this\s+(?:month|week|year)|today|current|latest|son\w*|aktif\w*|active|gecik\w*|overdue|odenmem\w*|unpaid|toplam\w*|total|amount|count|kac|how\s+(?:many|much)|ne\s+kadar|liste\w*|list|show|goster\w*|durum\w*|status|analiz\w*|analy[sz]e|iyilestir\w*|improve|art\w*|azal\w*|compare|karsilastir\w*)\b/.test(
       normalized
     );
-  return explicitCompanyContext || fixedReportRequest || (businessSubject && dataQualifier);
-}
-
-function clearlyGeneralChatRequested(value: string): boolean {
-  if (companyDataRequested(value)) return false;
-  const normalized = value
-    .toLocaleLowerCase("tr-TR")
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replaceAll("ı", "i")
-    .trim();
-  const explicitGeneral = /^(?:genel|general|general chat)\s*:/u.test(normalized);
-  const ownership = /\b(?:our|my|we|biz|bizim)\b/u.test(normalized);
-  const explicitLanguageAction =
-    /\b(?:translate|translation|cevir\w*|write|compose|yaz\w*|explain|acikla\w*|define|definition)\b/u.test(
-      normalized
-    );
-  const definitionQuestion =
-    !ownership && /\b(?:what is|what does|ne demek|nedir)\b/u.test(normalized);
-  const arithmetic =
-    /(?:\d\s*[-+*/×÷]\s*\d|\b(?:topla|toplam|carp|bol|sum|add|subtract|multiply|divide)\w*\b)/u.test(
-      normalized
-    );
-  const casual =
-    /^(?:merhaba|selam|hello|hi|hey|tesekkur\w*|thank\w*|tell me a joke|bir fikra|bir siir|write a poem)\b/u.test(
-      normalized
-    );
-  const assistantConversation =
-    /^(?:(?:sen(?:in)?\s+)?(?:ismin|adin)\s+ne|(?:sen\s+)?kimsin|who are you|what(?:'s| is) your name|(?:baska\s+)?ne(?:ler)?\s+yapabilirsin|yapabileceklerini\s+ozetle|what(?: else)? can you do|help|yardim)\b/u.test(
-      normalized
-    );
-  const explicitResponseRequest =
-    /\b(?:uzun cevap ver|give (?:me )?a long answer)\b/u.test(normalized) ||
-    (/\d/u.test(normalized) && /\b(?:say\w* tekrar et|repeat (?:the )?number)\b/u.test(normalized));
+  const implicitCompanyPerformance =
+    /\b(?:bu\s+(?:ay|hafta|yil)\s+)?ne\s+kadar\s+kazandik\b/.test(normalized) ||
+    /\b(?:how\s+much\s+did\s+we\s+make|did\s+we\s+make\s+(?:a\s+)?profit)\b/.test(normalized) ||
+    /\b(?:islerimiz\s+nasil\s+gidiyor|how\s+is\s+business\s+going)\b/.test(normalized);
   return (
-    explicitGeneral ||
-    explicitLanguageAction ||
-    definitionQuestion ||
-    arithmetic ||
-    casual ||
-    assistantConversation ||
-    explicitResponseRequest
+    explicitCompanyContext ||
+    fixedReportRequest ||
+    implicitCompanyPerformance ||
+    (businessSubject && dataQualifier)
   );
 }
 
@@ -536,7 +503,7 @@ export class CompanyLlmAssistant implements AssistantResponder {
     const groundingEvidence: string[] = [];
     const explicitSchemaInspection = schemaInspectionRequested(sanitizedIncomingText);
     const companyDataTurn = this.options.generalChatEnabled
-      ? !clearlyGeneralChatRequested(sanitizedIncomingText)
+      ? companyDataRequested(sanitizedIncomingText)
       : true;
     const seenCallIds = new Set<string>();
 
