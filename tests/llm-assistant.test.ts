@@ -318,10 +318,8 @@ describe("LLM company assistant", () => {
   it.each([
     "İsmin ne?",
     "Sen kimsin?",
-    "Başka ne yapabilirsin?",
     "Yapabileceklerini özetle",
-    "Yardım",
-    "What can you do?"
+    "Yardım"
   ])("treats assistant conversation as general chat: %s", async (incomingText) => {
     const gateway = new DirectAnswerGateway("Size yardımcı olabilirim.");
     const sessions = new FakeSessionFactory();
@@ -346,6 +344,43 @@ describe("LLM company assistant", () => {
       kind: "conversation"
     });
     expect(sessions.session.calls).toEqual([]);
+  });
+
+  it.each([
+    "Ne yapabilirsin?",
+    "Ne yapabilrsin?",
+    "Başka ne yapabilirsin?",
+    "Özelliklerin neler?",
+    "Ne yapmak için tasarlandın?",
+    "Ne işe yararsın?",
+    "Amacın ne?",
+    "What can you do?"
+  ])("returns the capability menu for: %s", async (incomingText) => {
+    const gateway = new DirectAnswerGateway("unused");
+    const sessions = new FakeSessionFactory();
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions,
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "capability-user", department: null, role: "employee" },
+      incomingText,
+      { messageId: `message-capability-${incomingText}` }
+    );
+
+    expect(result).toMatchObject({
+      outcome: "success",
+      kind: "conversation"
+    });
+    expect(result.text).toContain("Genel sohbet");
+    expect(result.text).toContain("satış özeti");
+    expect(gateway.requests).toHaveLength(0);
+    expect(sessions.actorId).toBeNull();
   });
 
   it("fails closed on a tool-free company-data answer", async () => {

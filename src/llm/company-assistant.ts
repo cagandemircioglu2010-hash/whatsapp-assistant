@@ -451,6 +451,19 @@ function isMenuCommand(value: string): boolean {
   return command === "menü" || command === "menu";
 }
 
+function isCapabilityCommand(value: string): boolean {
+  const command = value
+    .toLocaleLowerCase("tr-TR")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replaceAll("ı", "i")
+    .replace(/[.!?]+$/u, "")
+    .trim();
+  return /^(?:(?:baska\s+)?ne(?:ler)?\s+yapabil(?:i)?rsin|ozelliklerin\s+ne(?:ler)?|ne\s+yapmak\s+icin\s+tasarlandin|ne\s+ise\s+yararsin|amacin\s+ne|what(?: else)? can you do|what are your (?:features|capabilities)|what were you (?:built|designed) (?:for|to do))$/u.test(
+    command
+  );
+}
+
 function hybridMenuText(
   user: AuthorizedUser,
   schemaDiscoveryEnabled: boolean,
@@ -492,7 +505,10 @@ export class CompanyLlmAssistant implements AssistantResponder {
         ...(this.options.generalChatEnabled ? { kind: "conversation" as const } : {})
       };
     }
-    if (this.options.generalChatEnabled && isMenuCommand(sanitizedIncomingText)) {
+    if (
+      this.options.generalChatEnabled &&
+      (isMenuCommand(sanitizedIncomingText) || isCapabilityCommand(sanitizedIncomingText))
+    ) {
       return {
         text: hybridMenuText(
           user,
