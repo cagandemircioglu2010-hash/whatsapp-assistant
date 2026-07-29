@@ -90,6 +90,21 @@ class TwoTurnGateway implements LlmGateway {
   }
 }
 
+class MalformedNumberGateway extends TwoTurnGateway {
+  override async createTurn(request: LlmTurnRequest) {
+    const turn = await super.createTurn(request);
+    if (this.requests.length === 2) {
+      return {
+        outputText:
+          "2.5000,00 TL ciro ve 5 tamamlanan satış elde edildi.",
+        replayItems: [],
+        functionCalls: []
+      };
+    }
+    return turn;
+  }
+}
+
 class DirectAnswerGateway implements LlmGateway {
   requests: LlmTurnRequest[] = [];
 
@@ -256,6 +271,26 @@ describe("LLM company assistant", () => {
     expect(gateway.requests[1]?.inputItems).toContainEqual(
       expect.objectContaining({ type: "function_call_output", call_id: "call-1" })
     );
+  });
+
+  it("normalizes malformed localized money copied from grounded tool data", async () => {
+    const assistant = new CompanyLlmAssistant({
+      gateway: new MalformedNumberGateway(),
+      sessions: new FakeSessionFactory(),
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "format-user", department: "Sales", role: "employee", locale: "tr" },
+      "Satışları topla ve ciroyu hesapla",
+      { messageId: "message-format" }
+    );
+
+    expect(result.text).toContain("25.000,00 TL");
+    expect(result.text).not.toContain("2.5000,00");
   });
 
   it("always closes the MCP session when the model fails", async () => {
