@@ -319,7 +319,10 @@ describe("LLM company assistant", () => {
     "İsmin ne?",
     "Sen kimsin?",
     "Yapabileceklerini özetle",
-    "Yardım"
+    "Yardım",
+    "Bugün nasılsın?",
+    "En sevdiğin renk ne?",
+    "Yeni updateinde ne yapmak için tasarlandın sorusuna cevap verebiliyor olman lazım, cevapla bakalım"
   ])("treats assistant conversation as general chat: %s", async (incomingText) => {
     const gateway = new DirectAnswerGateway("Size yardımcı olabilirim.");
     const sessions = new FakeSessionFactory();
