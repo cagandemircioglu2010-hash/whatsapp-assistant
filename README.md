@@ -224,7 +224,7 @@ npm run start:admin
 Render üzerinde ikinci bir **Web Service** oluştur:
 
 - aynı repository ve `main` branch
-- Build Command: `npm ci && npm run build`
+- Build Command: `npm ci --include=dev && npm run build`
 - Start Command: `npm run start:admin`
 - Health Check Path: `/health/live`
 - Instance Type: `Free`
@@ -235,7 +235,7 @@ Yalnızca bu ayrı servise aşağıdaki değişkenleri ekle:
 NODE_ENV=production
 HOST=0.0.0.0
 DATABASE_SSL_MODE=verify-full
-DATABASE_ADMIN_URL=<Render internal owner URL>
+DATABASE_ADMIN_URL=<Render external owner URL>
 DEFAULT_PHONE_COUNTRY=TR
 WHITELIST_ADMIN_PASSWORD=<ayrı ve rastgele en az 32 karakter>
 DATA_ENCRYPTION_ACTIVE_KEY_ID=<assistant ile aynı>
@@ -246,11 +246,13 @@ AUDIT_INTEGRITY_ACTIVE_KEY_ID=<assistant ile aynı>
 AUDIT_INTEGRITY_KEYS=<assistant ile aynı>
 ```
 
-Arayüz HTTP Basic Authentication kullanır. Kullanıcı adı `admin`, parola
-`WHITELIST_ADMIN_PASSWORD` değeridir. Telefonlar tarayıcıda maskelenir; ekleme,
-güncelleme ve aktif/pasif işlemleri mevcut şifreleme, HMAC ve audit-chain
-kurallarını kullanır. `DATABASE_ADMIN_URL` değişkenini ana WhatsApp servisine
-ekleme.
+Arayüz ayrı bir giriş sayfası ve güvenli, HTTP-only oturum çerezi kullanır.
+Parola `WHITELIST_ADMIN_PASSWORD` değeridir; ilk normal sayfa isteği ve sayfa
+yenilemeleri hatalı parola denemesi sayılmaz. Doğru parola, daha önceki hatalı
+denemeler yüzünden oluşmuş geçici kilidi de güvenli biçimde temizler. Telefonlar
+tarayıcıda maskelenir; ekleme, güncelleme ve aktif/pasif işlemleri mevcut
+şifreleme, HMAC ve audit-chain kurallarını kullanır. `DATABASE_ADMIN_URL`
+değişkenini ana WhatsApp servisine ekleme.
 
 ## Kendi kendine servis komutları ve güvenlik
 
