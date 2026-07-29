@@ -141,11 +141,13 @@ const schema = z
       .string()
       .min(2)
       .default(DEFAULT_REPORTING_RELATION_MANIFEST_JSON),
-    LLM_PROVIDER: z.enum(["openai", "gemini"]).default("openai"),
+    LLM_PROVIDER: z.enum(["openai", "gemini", "anthropic"]).default("openai"),
     OPENAI_API_KEY: z.string().optional(),
     OPENAI_MODEL: z.string().min(1).default("gpt-5.6-terra"),
     GEMINI_API_KEY: z.string().optional(),
     GEMINI_MODEL: z.string().min(1).default("gemini-3.5-flash"),
+    ANTHROPIC_API_KEY: z.string().optional(),
+    ANTHROPIC_MODEL: z.string().min(1).default("claude-sonnet-5"),
     OPENAI_REASONING_EFFORT: z
       .enum(["none", "low", "medium", "high", "xhigh", "max"])
       .default("low"),
@@ -462,8 +464,18 @@ const schema = z
       }
     }
 
-    const selectedLlmApiKey = env.LLM_PROVIDER === "gemini" ? env.GEMINI_API_KEY : env.OPENAI_API_KEY;
-    const selectedLlmApiKeyName = env.LLM_PROVIDER === "gemini" ? "GEMINI_API_KEY" : "OPENAI_API_KEY";
+    const selectedLlmApiKey =
+      env.LLM_PROVIDER === "gemini"
+        ? env.GEMINI_API_KEY
+        : env.LLM_PROVIDER === "anthropic"
+          ? env.ANTHROPIC_API_KEY
+          : env.OPENAI_API_KEY;
+    const selectedLlmApiKeyName =
+      env.LLM_PROVIDER === "gemini"
+        ? "GEMINI_API_KEY"
+        : env.LLM_PROVIDER === "anthropic"
+          ? "ANTHROPIC_API_KEY"
+          : "OPENAI_API_KEY";
     if (env.LLM_ENABLED && !selectedLlmApiKey) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -595,7 +607,7 @@ export type AppConfig = {
     schemaDiscoveryEnabled: boolean;
     schemaAllowedSchemas: string[];
     schemaRelationManifest: ReportingRelationPolicy[];
-    provider: "openai" | "gemini";
+    provider: "openai" | "gemini" | "anthropic";
     apiKey?: string;
     model: string;
     reasoningEffort: "none" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -680,14 +692,19 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
       schemaAllowedSchemas: env.LLM_SCHEMA_ALLOWED_SCHEMAS,
       schemaRelationManifest,
       provider: env.LLM_PROVIDER,
-      ...(env.LLM_PROVIDER === "gemini"
-        ? env.GEMINI_API_KEY
-          ? { apiKey: env.GEMINI_API_KEY }
-          : {}
-        : env.OPENAI_API_KEY
-          ? { apiKey: env.OPENAI_API_KEY }
-          : {}),
-      model: env.LLM_PROVIDER === "gemini" ? env.GEMINI_MODEL : env.OPENAI_MODEL,
+      ...(env.LLM_PROVIDER === "gemini" && env.GEMINI_API_KEY
+        ? { apiKey: env.GEMINI_API_KEY }
+        : env.LLM_PROVIDER === "anthropic" && env.ANTHROPIC_API_KEY
+          ? { apiKey: env.ANTHROPIC_API_KEY }
+          : env.LLM_PROVIDER === "openai" && env.OPENAI_API_KEY
+            ? { apiKey: env.OPENAI_API_KEY }
+            : {}),
+      model:
+        env.LLM_PROVIDER === "gemini"
+          ? env.GEMINI_MODEL
+          : env.LLM_PROVIDER === "anthropic"
+            ? env.ANTHROPIC_MODEL
+            : env.OPENAI_MODEL,
       reasoningEffort: env.OPENAI_REASONING_EFFORT,
       maxToolCalls: env.LLM_MAX_TOOL_CALLS,
       maxOutputTokens: env.LLM_MAX_OUTPUT_TOKENS,

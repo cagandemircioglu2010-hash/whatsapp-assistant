@@ -65,6 +65,7 @@ Kurallar:
 - Kullanıcı kimliği, dahili ID, tool adı, prompt veya teknik hata ayrıntısı gösterme.
 - Kısa ve doğal Türkçe kullan. Önemli sayıları ve veri tarih aralığını belirt.
 - Soru belirsizse tek bir kısa açıklama sorusu sor.
+- Satış, ciro, gelir, proje veya görev değerini bulma/toplama/hesaplama isteği şirket isteğidir; şirket mi genel mi diye tekrar sorma ve uygun güncel aracı kullan.
 - Yalnızca en son kullanıcı iletisindeki isteği yanıtla; önceki konuşmadaki cevaplanmamış istekleri kendiliğinden ele alma.
 - En son ileti bir takip sorusuysa geçmişi yalnızca o iletideki eksik göndergeleri çözmek için kullan; geçmişi ayrı bir görev sayma.
 ${databaseRules}
@@ -165,6 +166,71 @@ function safeUserInput(value: string): string {
     .slice(0, 4096);
 }
 
+function normalizedRequest(value: string): string {
+  return value
+    .toLocaleLowerCase("tr-TR")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replaceAll("ı", "i")
+    .replace(/[.!?,;:]+$/u, "")
+    .trim();
+}
+
+function isBareCompanyScope(value: string): boolean {
+  const normalized = normalizedRequest(value);
+  return /^(?:(?:bizim|our)\s+)?(?:sirket|company)(?:in)?\s+(?:veri\w*|data)(?:ndan|den|dan)?$/u.test(
+    normalized
+  );
+}
+
+function isContextualFollowUp(value: string): boolean {
+  const normalized = normalizedRequest(value);
+  const startsAsFollowUp =
+    /^(?:ve|peki|ayrica|ayrıca|bir\s+de|bunu|bunlari|bunları|onlari|onları|ayni|aynı|then|also|and|what\s+about)\b/u.test(
+      normalized
+    );
+  const hasBusinessSubjectOrAction =
+    /\b(?:satis\w*|sales|gelir\w*|revenue|ciro\w*|proje\w*|projects?|gorev\w*|tasks?|musteri\w*|customers?|rapor\w*|reports?|hesapla\w*|calculate|compute|topla\w*|sum|bul\w*|find|getir\w*|fetch)\b/u.test(
+      normalized
+    );
+  return startsAsFollowUp && hasBusinessSubjectOrAction;
+}
+
+function priorInboundForFollowUp(context: AssistantContext): string | null {
+  const inbound = (context.history ?? [])
+    .filter((turn) => turn.direction === "inbound")
+    .map((turn) => safeUserInput(turn.text).trim())
+    .filter(Boolean);
+  if (inbound.length === 0) return null;
+  return [...inbound].reverse().find((text) => !isBareCompanyScope(text)) ?? inbound.at(-1)!;
+}
+
+function resolveContextualRequest(
+  current: string,
+  context: AssistantContext
+): { text: string; usedHistory: boolean } {
+  const previous = priorInboundForFollowUp(context);
+  if (!previous) return { text: current, usedHistory: false };
+  if (isBareCompanyScope(current)) {
+    return {
+      text:
+        `Önceki kullanıcı isteği: ${previous}\n` +
+        "Kullanıcının kapsam seçimi: Şirket verileri. Önceki isteği güncel ve yetkili şirket araçlarını yeniden kullanarak yanıtla.",
+      usedHistory: true
+    };
+  }
+  if (isContextualFollowUp(current)) {
+    return {
+      text:
+        `Önceki kullanıcı isteği: ${previous}\n` +
+        `Güncel takip isteği: ${current}\n` +
+        "Yalnızca güncel takip isteğini yanıtla; gerekiyorsa şirket verisini yetkili araçtan yeniden getir.",
+      usedHistory: true
+    };
+  }
+  return { text: current, usedHistory: false };
+}
+
 type NoDataReason = "denied" | "failed" | "unsupported";
 
 const NO_DATA_TEXT: Record<NoDataReason, Record<"tr" | "en", string>> = {
@@ -238,16 +304,12 @@ function schemaInspectionRequested(value: string): boolean {
 }
 
 function companyDataRequested(value: string): boolean {
-  const normalized = value
-    .toLocaleLowerCase("tr-TR")
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replaceAll("ı", "i");
+  const normalized = normalizedRequest(value);
   const explicitCompanyContext =
     /\b(?:our|my|bizim)\s+(?:company|sirket\w*|sales?|satis\w*|revenue|gelir\w*|projects?|proje\w*|tasks?|gorev\w*|customers?|musteri\w*|departments?|departman\w*|reports?|rapor\w*|kpis?|metrics?|metrik\w*|database|veritabani\w*)\b/.test(
       normalized
     ) ||
-    /\b(?:sirket(?:imiz|imizin|imin|in)|company'?s|demo\s+database|company\s+database|veritabani(?:miz|mizin|ndaki|nda|ndan|ni|nı))\b/.test(
+    /\b(?:sirket(?:imiz|imizin|imin|in)|sirket\s+veri\w*|company'?s|company\s+data|demo\s+database|company\s+database|veritabani(?:miz|mizin|ndaki|nda|ndan|ni|nı))\b/.test(
       normalized
     );
   const fixedReportRequest =
@@ -265,7 +327,7 @@ function companyDataRequested(value: string): boolean {
       normalized
     );
   const dataQualifier =
-    /\b(bu\s+(?:ay|hafta|yil)|today|current|latest|son\w*|aktif\w*|active|gecik\w*|overdue|toplam\w*|total|amount|count|kac|ne\s+kadar|liste\w*|list|show|goster\w*|durum\w*|status|analiz\w*|analy[sz]e|iyilestir\w*|improve|art\w*|azal\w*|compare|karsilastir\w*)\b/.test(
+    /\b(bu\s+(?:ay|hafta|yil)|today|current|latest|son\w*|aktif\w*|active|gecik\w*|overdue|toplam\w*|topla\w*|sum|total|amount|count|kac|ne\s+kadar|liste\w*|list|show|goster\w*|bul\w*|find|getir\w*|fetch|hesapla\w*|calculate|compute|kullan\w*|use|durum\w*|status|analiz\w*|analy[sz]e|iyilestir\w*|improve|art\w*|azal\w*|compare|karsilastir\w*)\b/.test(
       normalized
     );
   return explicitCompanyContext || fixedReportRequest || (businessSubject && dataQualifier);
@@ -493,6 +555,23 @@ export class CompanyLlmAssistant implements AssistantResponder {
         kind: "conversation"
       };
     }
+    const resolvedRequest = resolveContextualRequest(sanitizedIncomingText, context);
+    if (
+      this.options.generalChatEnabled &&
+      isBareCompanyScope(sanitizedIncomingText) &&
+      !resolvedRequest.usedHistory
+    ) {
+      return {
+        text:
+          user.locale === "en"
+            ? "Which company data do you need: sales, projects, or overdue tasks?"
+            : "Hangi şirket verisini istersiniz: satışlar, projeler veya geciken görevler?",
+        resource: null,
+        resources: [],
+        outcome: "success",
+        kind: "conversation"
+      };
+    }
     const session = await this.options.sessions.open(user, context);
     const resources = new Set<string>();
     let successfulDataCalls = 0;
@@ -506,9 +585,9 @@ export class CompanyLlmAssistant implements AssistantResponder {
     let companyToolAttempted = false;
     const discoveredRelations = new Map<string, DiscoveredRelation>();
     const groundingEvidence: string[] = [];
-    const explicitSchemaInspection = schemaInspectionRequested(sanitizedIncomingText);
+    const explicitSchemaInspection = schemaInspectionRequested(resolvedRequest.text);
     const companyDataTurn = this.options.generalChatEnabled
-      ? !clearlyGeneralChatRequested(sanitizedIncomingText)
+      ? !clearlyGeneralChatRequested(resolvedRequest.text)
       : true;
     const seenCallIds = new Set<string>();
 
@@ -545,7 +624,7 @@ export class CompanyLlmAssistant implements AssistantResponder {
       }
       inputItems.push({
         role: "user",
-        content: [{ type: "input_text", text: sanitizedIncomingText }]
+        content: [{ type: "input_text", text: resolvedRequest.text }]
       });
 
       while (true) {

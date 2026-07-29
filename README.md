@@ -271,20 +271,20 @@ değişkenini ana WhatsApp servisine ekleme.
 
 ## LLM sağlayıcısı
 
-Ücretsiz-katman testleri için Gemini kullanılabilir:
+Üretim için Anthropic Claude Sonnet 5 yapılandırması:
 
 ```env
 LLM_ENABLED=true
 LLM_GENERAL_CHAT_ENABLED=true
 LLM_SCHEMA_DISCOVERY_ENABLED=false
 LLM_SCHEMA_ALLOWED_SCHEMAS=assistant_reporting
-LLM_PROVIDER=gemini
-GEMINI_API_KEY=<google-ai-studio-api-key>
-GEMINI_MODEL=gemini-3.5-flash
+LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=<anthropic-console-api-key>
+ANTHROPIC_MODEL=claude-sonnet-5
 ```
 
 `LLM_GENERAL_CHAT_ENABLED=true` hibrit modu açar: genel bilgi, matematik, yazım,
-çeviri ve gündelik sohbet Gemini tarafından yanıtlanır; şirketle ilgili gerçekler
+çeviri ve gündelik sohbet seçili model tarafından yanıtlanır; şirketle ilgili gerçekler
 ise yalnızca mevcut yetki kontrollü, salt-okunur rapor araçlarından alınır. Varsayılan
 değer `false` olduğundan mevcut dağıtımların davranışı bu seçenek açıkça etkinleştirilmedikçe değişmez.
 Hibrit modda önceki bot yanıtlarındaki şirket verileri modele yeniden verilmez;
@@ -333,8 +333,10 @@ nedenle yalnızca tanımı ve bağımlılıkları incelenmiş görünümleri kul
 DDL sahipliğini uygulama, kaynak sistem ve salt-okunur rollerden ayrı tutun ve mümkünse
 ayrı bir reporting/export veritabanı kullanın.
 
-Gemini ücretsiz katmanındaki istek ve yanıtlar Google ürünlerini iyileştirmek için kullanılabilir. OpenAI kullanmak
-için `LLM_PROVIDER=openai`, `OPENAI_API_KEY` ve `OPENAI_MODEL` ayarlanır.
+Alternatif olarak Gemini için `LLM_PROVIDER=gemini`, `GEMINI_API_KEY` ve
+`GEMINI_MODEL`; OpenAI için `LLM_PROVIDER=openai`, `OPENAI_API_KEY` ve
+`OPENAI_MODEL` ayarlanır. Veri işleme ve saklama koşullarını seçilen sağlayıcının
+güncel sözleşme ve gizlilik belgelerinden doğrulayın.
 
 Kullanıcı bazlı KVKK/GDPR erasure iki aşamalıdır. İlk komut yalnızca dry-run ve confirmation reference üretir:
 

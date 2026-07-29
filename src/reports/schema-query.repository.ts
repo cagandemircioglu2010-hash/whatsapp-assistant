@@ -25,7 +25,7 @@ const relationSchema = z
     /^[A-Za-z_][A-Za-z0-9_$]*\.[A-Za-z_][A-Za-z0-9_$]*$/,
     "Use an exact schema.relation name from the schema tool"
   );
-// Tool inputs stay string-only so both Gemini and OpenAI receive a simple,
+// Tool inputs stay string-only so every supported model provider receives a simple,
 // portable JSON schema. PostgreSQL safely coerces parameterized unknown values
 // to the compared column type; the model never supplies a cast or expression.
 const scalarSchema = z.string().max(500);

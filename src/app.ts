@@ -16,6 +16,7 @@ import { MessageRepository } from "./messages/message.repository.js";
 import { CompanyLlmAssistant } from "./llm/company-assistant.js";
 import { OpenAIResponsesGateway } from "./llm/openai-responses.gateway.js";
 import { GeminiChatCompletionsGateway } from "./llm/gemini-chat-completions.gateway.js";
+import { AnthropicMessagesGateway } from "./llm/anthropic-messages.gateway.js";
 import { CompanyMcpSessionFactory } from "./mcp/session.js";
 import { CompanyReportRepository } from "./reports/company-report.repository.js";
 import { SchemaQueryRepository } from "./reports/schema-query.repository.js";
@@ -132,20 +133,21 @@ export async function buildApp(dependencies: AppDependencies) {
   let responder: AssistantResponder = deterministicResponder;
 
   if (dependencies.config.llm.enabled) {
-    const gateway = dependencies.config.llm.provider === "gemini"
-      ? new GeminiChatCompletionsGateway({
-          apiKey: dependencies.config.llm.apiKey!,
-          model: dependencies.config.llm.model,
-          maxOutputTokens: dependencies.config.llm.maxOutputTokens,
-          timeoutMs: dependencies.config.llm.timeoutMs
-        })
-      : new OpenAIResponsesGateway({
-          apiKey: dependencies.config.llm.apiKey!,
-          model: dependencies.config.llm.model,
-          reasoningEffort: dependencies.config.llm.reasoningEffort,
-          maxOutputTokens: dependencies.config.llm.maxOutputTokens,
-          timeoutMs: dependencies.config.llm.timeoutMs
-        });
+    const commonGatewayOptions = {
+      apiKey: dependencies.config.llm.apiKey!,
+      model: dependencies.config.llm.model,
+      maxOutputTokens: dependencies.config.llm.maxOutputTokens,
+      timeoutMs: dependencies.config.llm.timeoutMs
+    };
+    const gateway =
+      dependencies.config.llm.provider === "gemini"
+        ? new GeminiChatCompletionsGateway(commonGatewayOptions)
+        : dependencies.config.llm.provider === "anthropic"
+          ? new AnthropicMessagesGateway(commonGatewayOptions)
+          : new OpenAIResponsesGateway({
+              ...commonGatewayOptions,
+              reasoningEffort: dependencies.config.llm.reasoningEffort
+            });
     const reportingQueries = dependencies.config.llm.schemaDiscoveryEnabled
       ? new SchemaQueryRepository(
           dependencies.companyReadonlyPool,

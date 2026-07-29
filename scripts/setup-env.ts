@@ -94,8 +94,10 @@ const values: Array<[key: string, value: string, renderValue?: string | null]> =
   ["LLM_SCHEMA_DISCOVERY_ENABLED", "false"],
   ["LLM_SCHEMA_ALLOWED_SCHEMAS", "assistant_reporting"],
   ["LLM_SCHEMA_RELATION_MANIFEST", DEFAULT_REPORTING_RELATION_MANIFEST_JSON],
-  ["LLM_PROVIDER", "gemini"],
-  ["GEMINI_API_KEY", "", "<aistudio.google.com API key>"],
+  ["LLM_PROVIDER", "anthropic"],
+  ["ANTHROPIC_API_KEY", "", "<console.anthropic.com API key>"],
+  ["ANTHROPIC_MODEL", "claude-sonnet-5"],
+  ["GEMINI_API_KEY", "", ""],
   ["GEMINI_MODEL", "gemini-3.5-flash"],
   ["OPENAI_API_KEY", "", ""],
   ["OPENAI_MODEL", "gpt-5.6-terra"],
@@ -139,7 +141,7 @@ process.stdout.write("Still needed by hand:\n");
 process.stdout.write("  WHATSAPP_ACCESS_TOKEN   Meta > WhatsApp > API Setup (permanent token: RUNBOOK §4)\n");
 process.stdout.write("  WHATSAPP_PHONE_NUMBER_ID  same page, the numeric ID\n");
 process.stdout.write("  META_APP_SECRET         Meta app > Settings > Basic\n");
-process.stdout.write("  GEMINI_API_KEY / OPENAI_API_KEY  if LLM_ENABLED=true\n\n");
+process.stdout.write("  ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY  for the selected LLM provider\n\n");
 process.stdout.write("Next steps:\n");
 process.stdout.write("  docker compose up -d && npm run db:migrate\n");
 process.stdout.write("  npm run db:provision-app-role && npm run db:provision-readonly\n");
