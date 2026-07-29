@@ -210,6 +210,48 @@ npm run db:list-access-requests            # son 14 gün, maskeli telefonlar
 npm run db:list-access-requests -- --days 30 --full
 ```
 
+### Ayrı whitelist yönetim arayüzü
+
+Whitelist'i tarayıcıdan yönetmek için ana WhatsApp servisinden ayrı bir web
+servisi çalıştırılır. Bu ayrım bilinçlidir: webhook/LLM süreci owner bağlantısını
+almaz ve whitelist yazamaz.
+
+```bash
+npm run build
+npm run start:admin
+```
+
+Render üzerinde ikinci bir **Web Service** oluştur:
+
+- aynı repository ve `main` branch
+- Build Command: `npm ci && npm run build`
+- Start Command: `npm run start:admin`
+- Health Check Path: `/health/live`
+- Instance Type: `Free`
+
+Yalnızca bu ayrı servise aşağıdaki değişkenleri ekle:
+
+```env
+NODE_ENV=production
+HOST=0.0.0.0
+DATABASE_SSL_MODE=verify-full
+DATABASE_ADMIN_URL=<Render internal owner URL>
+DEFAULT_PHONE_COUNTRY=TR
+WHITELIST_ADMIN_PASSWORD=<ayrı ve rastgele en az 32 karakter>
+DATA_ENCRYPTION_ACTIVE_KEY_ID=<assistant ile aynı>
+DATA_ENCRYPTION_KEYS=<assistant ile aynı>
+IDENTIFIER_HASH_ACTIVE_KEY_ID=<assistant ile aynı>
+IDENTIFIER_HASH_KEYS=<assistant ile aynı>
+AUDIT_INTEGRITY_ACTIVE_KEY_ID=<assistant ile aynı>
+AUDIT_INTEGRITY_KEYS=<assistant ile aynı>
+```
+
+Arayüz HTTP Basic Authentication kullanır. Kullanıcı adı `admin`, parola
+`WHITELIST_ADMIN_PASSWORD` değeridir. Telefonlar tarayıcıda maskelenir; ekleme,
+güncelleme ve aktif/pasif işlemleri mevcut şifreleme, HMAC ve audit-chain
+kurallarını kullanır. `DATABASE_ADMIN_URL` değişkenini ana WhatsApp servisine
+ekleme.
+
 ## Kendi kendine servis komutları ve güvenlik
 
 - **Gizlilik / KVKK**: kullanıcı "gizlilik" yazınca hangi verilerin tutulduğunu
