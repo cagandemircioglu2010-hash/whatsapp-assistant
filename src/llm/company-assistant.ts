@@ -295,10 +295,22 @@ function clearlyGeneralChatRequested(value: string): boolean {
     /^(?:merhaba|selam|hello|hi|hey|tesekkur\w*|thank\w*|tell me a joke|bir fikra|bir siir|write a poem)\b/u.test(
       normalized
     );
+  const assistantConversation =
+    /^(?:(?:sen(?:in)?\s+)?(?:ismin|adin)\s+ne|(?:sen\s+)?kimsin|who are you|what(?:'s| is) your name|(?:baska\s+)?ne(?:ler)?\s+yapabilirsin|yapabileceklerini\s+ozetle|what(?: else)? can you do|help|yardim)\b/u.test(
+      normalized
+    );
   const explicitResponseRequest =
     /\b(?:uzun cevap ver|give (?:me )?a long answer)\b/u.test(normalized) ||
     (/\d/u.test(normalized) && /\b(?:say\w* tekrar et|repeat (?:the )?number)\b/u.test(normalized));
-  return explicitGeneral || explicitLanguageAction || definitionQuestion || arithmetic || casual || explicitResponseRequest;
+  return (
+    explicitGeneral ||
+    explicitLanguageAction ||
+    definitionQuestion ||
+    arithmetic ||
+    casual ||
+    assistantConversation ||
+    explicitResponseRequest
+  );
 }
 
 const GROUNDING_STOP_WORDS = new Set([

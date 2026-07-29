@@ -315,6 +315,39 @@ describe("LLM company assistant", () => {
     expect(gateway.requests[0]?.instructions).toContain("Genel sorular için şirket araçlarını çağırma");
   });
 
+  it.each([
+    "İsmin ne?",
+    "Sen kimsin?",
+    "Başka ne yapabilirsin?",
+    "Yapabileceklerini özetle",
+    "Yardım",
+    "What can you do?"
+  ])("treats assistant conversation as general chat: %s", async (incomingText) => {
+    const gateway = new DirectAnswerGateway("Size yardımcı olabilirim.");
+    const sessions = new FakeSessionFactory();
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions,
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "assistant-conversation-user", department: null, role: "employee" },
+      incomingText,
+      { messageId: `message-assistant-conversation-${incomingText}` }
+    );
+
+    expect(result).toMatchObject({
+      text: "Size yardımcı olabilirim.",
+      outcome: "success",
+      kind: "conversation"
+    });
+    expect(sessions.session.calls).toEqual([]);
+  });
+
   it("fails closed on a tool-free company-data answer", async () => {
     const gateway = new DirectAnswerGateway("Şirket geliri 999.999 TL.");
     const sessions = new FakeSessionFactory();
