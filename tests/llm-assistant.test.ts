@@ -785,7 +785,41 @@ describe("LLM company assistant", () => {
     }
   );
 
-  it.each(["yapay zeka modeli ne?", "modelin ne", "which AI model do you use"])(
+  it("does not mistake an ordinary model topic for assistant identity", async () => {
+    const gateway = new DirectAnswerGateway(
+      "Ekonomik model, değişkenler arasındaki ilişkileri açıklayan sadeleştirilmiş bir çerçevedir."
+    );
+    const sessions = new FakeSessionFactory();
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions,
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true,
+      provider: "anthropic",
+      model: "claude-sonnet-5"
+    });
+
+    const result = await assistant.handle(
+      { id: "model-topic-user", department: null, role: "employee", locale: "tr" },
+      "Ekonomik model nasıl çalışır?",
+      { messageId: "message-model-topic" }
+    );
+
+    expect(result.text).toContain("Ekonomik model");
+    expect(result.text).not.toContain("claude-sonnet-5");
+    expect(gateway.requests).toHaveLength(1);
+    expect(sessions.actorId).toBe("model-topic-user");
+  });
+
+  it.each([
+    "yapay zeka modeli ne?",
+    "modelin ne",
+    "Hangi yapay zeka modelini kullanıyorsun?",
+    "şu an kullandığın model ne",
+    "which AI model do you use"
+  ])(
     "answers configured model identity safely without using a company tool: %s",
     async (prompt) => {
       const gateway = new DirectAnswerGateway("unused");
