@@ -184,6 +184,7 @@ describe("Anthropic Messages gateway", () => {
             strict: true
           }
         ],
+        toolChoice: "required",
         safetyIdentifier: "safe-id"
       })
     ).resolves.toMatchObject({ outputText: "44" });
@@ -192,6 +193,7 @@ describe("Anthropic Messages gateway", () => {
       tools: Array<{ input_schema: Record<string, unknown> }>;
     };
     const schema = body.tools[0]!.input_schema;
+    expect(body).toMatchObject({ tool_choice: { type: "any" } });
     expect(schema).toMatchObject({
       properties: {
         columns: {
