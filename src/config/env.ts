@@ -41,7 +41,7 @@ const allowedSchemaList = z
       context.addIssue({
         code: z.ZodIssueCode.custom,
         message:
-          "LLM_SCHEMA_ALLOWED_SCHEMAS must contain 1-10 comma-separated non-system PostgreSQL schema names"
+          "LLM_SCHEMA_ALLOWED_SCHEMAS must contain 1-10 comma-separated non-system logical schema names"
       });
       return z.NEVER;
     }
@@ -56,6 +56,16 @@ const postgresUrl = z.string().url().refine((value) => {
     return false;
   }
 }, "Must be a PostgreSQL URL without inline TLS or session parameters");
+
+const mongodbUrl = z
+  .string()
+  .min(10)
+  .max(8_192)
+  .refine(
+    (value) => value.startsWith("mongodb://") || value.startsWith("mongodb+srv://"),
+    "Must be a mongodb:// or mongodb+srv:// connection string"
+  )
+  .refine((value) => !/[\r\n\u0000]/.test(value), "MongoDB connection string is malformed");
 
 function looksLikeWeakSecret(value: string): boolean {
   return /replace|changeme|example|password|secret/i.test(value) || new Set(value).size < 8;
@@ -93,6 +103,18 @@ const schema = z
     COMPANY_DATABASE_SSL_MODE: z.enum(["disable", "verify-full"]).optional(),
     COMPANY_DATABASE_CA_CERT: z.string().min(1).optional(),
     COMPANY_DATABASE_CA_CERT_FILE: z.string().min(1).optional(),
+    MONGODB_ENABLED: booleanFromString,
+    MONGODB_URI: mongodbUrl.optional(),
+    MONGODB_URI_FILE: z.string().min(1).optional(),
+    MONGODB_DATABASE: z
+      .string()
+      .min(1)
+      .max(63)
+      .regex(/^[A-Za-z_][A-Za-z0-9_-]*$/)
+      .optional(),
+    MONGODB_CONNECT_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(30_000).default(5_000),
+    MONGODB_QUERY_TIMEOUT_MS: z.coerce.number().int().min(250).max(10_000).default(2_000),
+    MONGODB_MAX_POOL_SIZE: z.coerce.number().int().min(1).max(20).default(5),
     PHONE_HASH_SECRET: z.string().min(32).optional(),
     IDENTIFIER_HASH_ACTIVE_KEY_ID: z.string().optional(),
     IDENTIFIER_HASH_KEYS: z.string().optional(),
@@ -167,6 +189,7 @@ const schema = z
         message: "DEFAULT_PHONE_COUNTRY is not supported"
       });
     }
+    if (!Array.isArray(env.LLM_SCHEMA_ALLOWED_SCHEMAS)) return;
     try {
       new Intl.DateTimeFormat("en", { timeZone: env.COMPANY_TIMEZONE }).format();
     } catch {
@@ -363,6 +386,58 @@ const schema = z
       }
     }
 
+    if (env.MONGODB_ENABLED) {
+      if (!env.MONGODB_URI) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["MONGODB_URI"],
+          message: "MONGODB_URI is required when MONGODB_ENABLED=true"
+        });
+      }
+      if (!env.MONGODB_DATABASE) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["MONGODB_DATABASE"],
+          message: "MONGODB_DATABASE is required when MONGODB_ENABLED=true"
+        });
+      }
+      if (!env.LLM_ENABLED || !env.LLM_SCHEMA_DISCOVERY_ENABLED) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["MONGODB_ENABLED"],
+          message: "MongoDB reporting requires LLM_ENABLED=true and LLM_SCHEMA_DISCOVERY_ENABLED=true"
+        });
+      }
+      if (
+        env.NODE_ENV === "production" &&
+        env.MONGODB_URI &&
+        !env.MONGODB_URI.startsWith("mongodb+srv://")
+      ) {
+        let tlsEnabled = false;
+        try {
+          const parsed = new URL(env.MONGODB_URI);
+          tlsEnabled =
+            parsed.searchParams.get("tls") === "true" ||
+            parsed.searchParams.get("ssl") === "true";
+        } catch {
+          tlsEnabled = false;
+        }
+        if (!tlsEnabled) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["MONGODB_URI"],
+            message: "Production MongoDB connections must use mongodb+srv or explicitly enable TLS"
+          });
+        }
+      }
+    } else if (env.MONGODB_URI || env.MONGODB_DATABASE) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["MONGODB_ENABLED"],
+        message: "Set MONGODB_ENABLED=true when MongoDB connection settings are present"
+      });
+    }
+
     if (env.MESSAGE_RECORD_RETENTION_DAYS < env.MESSAGE_RETENTION_DAYS) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -502,6 +577,21 @@ const schema = z
         env.LLM_SCHEMA_RELATION_MANIFEST,
         env.LLM_SCHEMA_ALLOWED_SCHEMAS
       );
+      const mongoPolicies = relationManifest.filter((policy) => policy.source === "mongodb");
+      if (env.MONGODB_ENABLED && mongoPolicies.length === 0) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["LLM_SCHEMA_RELATION_MANIFEST"],
+          message: "MongoDB is enabled but the reporting manifest has no MongoDB relations"
+        });
+      }
+      if (!env.MONGODB_ENABLED && mongoPolicies.length > 0) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["MONGODB_ENABLED"],
+          message: "MongoDB relation policies require MONGODB_ENABLED=true"
+        });
+      }
       if (env.LLM_SCHEMA_DISCOVERY_ENABLED) {
         const discoveryPages = assertReportingManifestDiscoveryBudget(
           relationManifest,
@@ -567,6 +657,14 @@ export type AppConfig = {
   companyReportsEnabled: boolean;
   databaseTls: DatabaseTlsConfig;
   companyDatabaseTls: DatabaseTlsConfig;
+  mongodb: {
+    enabled: boolean;
+    uri?: string;
+    database?: string;
+    connectTimeoutMs: number;
+    queryTimeoutMs: number;
+    maxPoolSize: number;
+  };
   identifierHash: HmacKeyRingConfig;
   auditIntegrity: HmacKeyRingConfig;
   safetyIdentifierSecret?: string;
@@ -649,6 +747,14 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     companyReportsEnabled: env.COMPANY_REPORTS_ENABLED,
     databaseTls: tls(appTlsMode, env.DATABASE_CA_CERT),
     companyDatabaseTls: tls(companyTlsMode, env.COMPANY_DATABASE_CA_CERT ?? env.DATABASE_CA_CERT),
+    mongodb: {
+      enabled: env.MONGODB_ENABLED,
+      ...(env.MONGODB_URI ? { uri: env.MONGODB_URI } : {}),
+      ...(env.MONGODB_DATABASE ? { database: env.MONGODB_DATABASE } : {}),
+      connectTimeoutMs: env.MONGODB_CONNECT_TIMEOUT_MS,
+      queryTimeoutMs: env.MONGODB_QUERY_TIMEOUT_MS,
+      maxPoolSize: env.MONGODB_MAX_POOL_SIZE
+    },
     identifierHash,
     auditIntegrity,
     ...(env.SAFETY_IDENTIFIER_SECRET

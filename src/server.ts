@@ -2,7 +2,9 @@ import "dotenv/config";
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config/env.js";
 import { createDatabasePool } from "./db/pools.js";
+import { createMongoReportingConnection } from "./db/mongodb.js";
 import { assertRuntimeReady } from "./db/readiness.js";
+import { createReportingQueries } from "./reports/reporting-query.factory.js";
 import { EnvelopeEncryption } from "./security/encryption.js";
 import { VersionedHmac } from "./security/keyed-hash.js";
 import { createLogger, logSafe } from "./logging/logger.js";
@@ -20,6 +22,23 @@ const companyReadonlyPool = createDatabasePool(config.companyReadonlyDatabaseUrl
   applicationName: "company-whatsapp-assistant-reports",
   forceReadOnly: true
 });
+const mongoConnection = config.mongodb.enabled
+  ? await createMongoReportingConnection({
+      uri: config.mongodb.uri!,
+      database: config.mongodb.database!,
+      connectTimeoutMs: config.mongodb.connectTimeoutMs,
+      maxPoolSize: config.mongodb.maxPoolSize
+    })
+  : null;
+const reportingQueries = config.llm.schemaDiscoveryEnabled
+  ? createReportingQueries({
+      postgresPool: companyReadonlyPool,
+      ...(mongoConnection ? { mongoDatabase: mongoConnection.database } : {}),
+      allowedSchemas: config.llm.schemaAllowedSchemas,
+      relationManifest: config.llm.schemaRelationManifest,
+      mongoQueryTimeoutMs: config.mongodb.queryTimeoutMs
+    })
+  : undefined;
 
 if (config.nodeEnv === "production") {
   if (!config.dataEncryption) throw new Error("Production encryption configuration is missing");
@@ -37,7 +56,8 @@ if (config.nodeEnv === "production") {
         reportsEnabled: config.companyReportsEnabled,
         schemaDiscoveryEnabled: config.llm.schemaDiscoveryEnabled,
         allowedSchemas: config.llm.schemaAllowedSchemas,
-        relationManifest: config.llm.schemaRelationManifest
+        relationManifest: config.llm.schemaRelationManifest,
+        ...(reportingQueries ? { reportingQueries } : {})
       }
     );
   } finally {
@@ -47,7 +67,13 @@ if (config.nodeEnv === "production") {
   }
 }
 
-const app = await buildApp({ config, appPool, companyReadonlyPool, logger });
+const app = await buildApp({
+  config,
+  appPool,
+  companyReadonlyPool,
+  ...(mongoConnection ? { mongoDatabase: mongoConnection.database } : {}),
+  logger
+});
 
 let shutdownPromise: Promise<void> | null = null;
 
@@ -57,7 +83,11 @@ function shutdown(signal: string, exitCode = 0): Promise<void> {
     logSafe(logger, "info", { signal }, "Shutting down");
     try {
       await app.close();
-      await Promise.all([appPool.end(), companyReadonlyPool.end()]);
+      await Promise.all([
+        appPool.end(),
+        companyReadonlyPool.end(),
+        mongoConnection?.client.close()
+      ]);
       process.exitCode = exitCode;
     } catch (error) {
       logSafe(logger, "error", { error }, "Graceful shutdown failed");
@@ -82,6 +112,10 @@ try {
   await app.listen({ host: config.host, port: config.port });
 } catch (error) {
   logSafe(logger, "error", { error }, "Server failed to start");
-  await Promise.all([appPool.end(), companyReadonlyPool.end()]);
+  await Promise.all([
+    appPool.end(),
+    companyReadonlyPool.end(),
+    mongoConnection?.client.close()
+  ]);
   process.exit(1);
 }

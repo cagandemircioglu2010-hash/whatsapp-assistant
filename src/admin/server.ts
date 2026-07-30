@@ -37,6 +37,7 @@ await store.assertReady();
 const app = await buildWhitelistAdminApp({
   store,
   password: config.password,
+  additionalPermissions: config.additionalPermissions,
   logger,
   production: config.nodeEnv === "production"
 });

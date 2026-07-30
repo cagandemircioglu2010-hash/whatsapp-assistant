@@ -224,7 +224,7 @@ export function createCompanyMcpServer(dependencies: CompanyMcpServerDependencie
       {
         title: "Veritabanı şemasını keşfet",
         description:
-          `İzin verilen salt-okunur veritabanı görünümlerini ve güvenli alan adlarını sayfalar halinde listeler. İlk çağrıda cursor için null, devam sayfasında önceki sonucun nextCursor değerini kullan. Bir mesajda en fazla ${MAX_SCHEMA_DISCOVERY_CALLS_PER_MESSAGE} kez çağır; sonuçtaki tam schema.relation ve alan adlarını kullan.`,
+          `İzin verilen PostgreSQL görünümleri ve MongoDB koleksiyonlarını, iş açıklamalarını ve güvenli alan adlarını sayfalar halinde listeler. İlk çağrıda cursor için null, devam sayfasında önceki sonucun nextCursor değerini kullan. Bir mesajda en fazla ${MAX_SCHEMA_DISCOVERY_CALLS_PER_MESSAGE} kez çağır; sonuçtaki tam mantıksal ilişki ve alan adlarını kullan.`,
         inputSchema: reportingSchemaInputShape,
         annotations: readOnlyAnnotations
       },
@@ -250,7 +250,7 @@ export function createCompanyMcpServer(dependencies: CompanyMcpServerDependencie
       {
         title: "Veritabanını güvenli sorgula",
         description:
-          "Keşfedilmiş tek bir salt-okunur ilişkiyi yapılandırılmış filtre, toplama, sıralama ve satır sınırıyla sorgular. SQL metni, join, alt sorgu veya yazma işlemi kabul etmez. Sadece describe_database sonucundaki adları kullan ve bu aracı mesaj başına en fazla bir kez çağır.",
+          "Keşfedilmiş tek bir PostgreSQL veya MongoDB salt-okunur ilişkisini yapılandırılmış filtre, toplama, sıralama ve satır sınırıyla sorgular. SQL, MongoDB pipeline/kodu, join veya yazma işlemi kabul etmez. Sadece describe_database sonucundaki adları kullan ve bu aracı mesaj başına en fazla bir kez çağır.",
         inputSchema: reportingQueryInputShape,
         annotations: readOnlyAnnotations
       },
@@ -306,6 +306,7 @@ export function createCompanyMcpServer(dependencies: CompanyMcpServerDependencie
             ...(policy ? { resource: policy.resource } : {}),
             details: {
               relation: policy?.relation ?? "unmapped",
+              source: policy ? policy.source ?? "postgres" : "unmapped",
               queryShapeHash: createHash("sha256")
                 .update(JSON.stringify(shape))
                 .digest("hex")

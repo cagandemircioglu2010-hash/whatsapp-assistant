@@ -18,6 +18,12 @@ function config(): AppConfig {
     companyReportsEnabled: true,
     databaseTls: false,
     companyDatabaseTls: false,
+    mongodb: {
+      enabled: false,
+      connectTimeoutMs: 5000,
+      queryTimeoutMs: 2000,
+      maxPoolSize: 5
+    },
     identifierHash: legacyHmacKeyRing("x".repeat(32)),
     auditIntegrity: legacyHmacKeyRing("a".repeat(32)),
     safetyIdentifierSecret: "s".repeat(32),

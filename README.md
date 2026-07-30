@@ -1,9 +1,10 @@
 # Company WhatsApp Assistant
 
-Yetkili çalışanlara WhatsApp üzerinden yalnızca izinli ve toplulaştırılmış şirket raporları sunan
-TypeScript/PostgreSQL, MCP ve OpenAI backend'i. Meta webhook imzası doğrulanır, kimlik whitelist üzerinden
-belirlenir, şirket verisi salt-okunur reporting view'larından alınır ve hassas uygulama verisi yaşam döngüsü
-boyunca şifreli tutulur.
+Yetkili çalışanlara WhatsApp üzerinden yalnızca izinli şirket raporları sunan
+TypeScript, PostgreSQL, isteğe bağlı MongoDB, MCP ve çoklu LLM sağlayıcılı backend.
+Meta webhook imzası doğrulanır, kimlik whitelist üzerinden belirlenir, şirket verisi
+insan tarafından onaylanmış salt-okunur PostgreSQL view'ları veya MongoDB
+collection'larından alınır ve hassas uygulama verisi yaşam döngüsü boyunca şifreli tutulur.
 
 ## Güvenlik modeli
 
@@ -25,9 +26,11 @@ boyunca şifreli tutulur.
 - Meta `X-Hub-Signature-256` doğrulaması production'da kapatılamaz. Webhook kapatılan bir client DB'si
   `service_state` üzerinden tekrar veri kabul etmez; farklı bir WhatsApp phone-number ID'sine ait imzalı event de
   işlenmez.
-- OpenAI çağrıları `store=false`, ayrı safety identifier, izinli MCP tool listesi, bounded tool loop ve deterministik
-  fallback kullanır.
+- LLM çağrıları yalnızca izinli MCP tool listesi, bounded tool loop ve deterministik
+  fallback kullanır. OpenAI seçildiğinde ayrıca `store=false` ve ayrı safety identifier uygulanır.
 - Uygulama ve reporting DB rolleri ayrıdır; reporting transaction'ları zorunlu read-only çalışır.
+- MongoDB sorguları da ham sorgu/pipeline kabul etmez; yalnızca manifestteki collection ve
+  alanlara karşı sunucunun oluşturduğu sınırlı `find`/aggregation işlemleri çalışır.
 - CI: pinned Actions, CodeQL, locked dependency audit, Dependabot, history secret scan, npm audit, coverage/stress testleri
   ve Trivy production-image taraması.
 
@@ -40,8 +43,8 @@ Meta imzalı webhook
   -> yalnızca authorized mesajı record-bound ciphertext olarak kalıcı kuyruğa al
   -> bounded worker + distributed user limit
   -> permission + department scope
-  -> read-only reporting view / izinli MCP tool
-  -> OpenAI veya deterministik cevap
+  -> PostgreSQL view veya MongoDB collection / izinli MCP tool
+  -> seçili LLM veya deterministik cevap
   -> idempotent outbox + WhatsApp delivery state
   -> chained audit + otomatik retention
 ```
@@ -50,6 +53,7 @@ Meta imzalı webhook
 
 - Node.js 24 LTS (`>=24.14.0 <25`)
 - PostgreSQL 14+; production için desteklenen güncel minor sürüm
+- MongoDB 6+ veya Atlas (yalnızca MongoDB rapor kaynağı etkinleştirilecekse)
 - Yerel geliştirme için Docker
 
 ## Yerel kurulum
@@ -238,6 +242,7 @@ DATABASE_SSL_MODE=verify-full
 DATABASE_ADMIN_URL=<Render external owner URL>
 DEFAULT_PHONE_COUNTRY=TR
 WHITELIST_ADMIN_PASSWORD=<ayrı ve rastgele en az 32 karakter>
+WHITELIST_ADDITIONAL_PERMISSIONS=company.database.relation.customer-metrics
 DATA_ENCRYPTION_ACTIVE_KEY_ID=<assistant ile aynı>
 DATA_ENCRYPTION_KEYS=<assistant ile aynı>
 IDENTIFIER_HASH_ACTIVE_KEY_ID=<assistant ile aynı>
@@ -289,12 +294,17 @@ ise yalnızca mevcut yetki kontrollü, salt-okunur rapor araçlarından alınır
 değer `false` olduğundan mevcut dağıtımların davranışı bu seçenek açıkça etkinleştirilmedikçe değişmez.
 Hibrit modda önceki bot yanıtlarındaki şirket verileri modele yeniden verilmez;
 güncel yanıtlar her seferinde kullanıcının mevcut izinleriyle araçlardan tekrar alınır.
+“Ne yapabilirsin?” ve “Hangi modeli kullanıyorsun?” gibi güvenli yetenek/kimlik
+soruları sağlayıcı çağrısı harcamadan deterministik yanıtlanır. Şirket verisi istediği
+açıkça belli olan bir soru araçlarla doğrulanamazsa bot veri uydurmaz; gündelik ve
+zararsız sohbet ise artık gereksiz yere şirket-verisi hatasına düşmez.
 
 ### Şema-aware veritabanı soruları
 
 `LLM_SCHEMA_DISCOVERY_ENABLED=true`, yalnızca ayrıca
 `company.database.explore` izni verilmiş `admin` veya `executive` kullanıcılar
-için onaylı PostgreSQL raporlama görünümlerini keşfetmeyi açar. Model ham SQL çalıştırmaz.
+için onaylı PostgreSQL raporlama görünümlerini ve MongoDB collection'larını
+keşfetmeyi açar. Model ham SQL, MongoDB sorgusu veya pipeline çalıştırmaz.
 Önce erişilebilir görünüm ve güvenli alan adlarını okur, sonra filtre,
 toplama, gruplama, sıralama ve en fazla 50 satır içeren yapılandırılmış bir
 sorgu gönderir; sunucu bunu parametreli tek bir `SELECT` olarak derler.
@@ -325,6 +335,14 @@ filtresini kabul eder; yalnızca küçük ve önceden özetlenmiş görünüm
 için insan incelemesi sonrası `true` yapılmalıdır. Böylece herhangi bir PostgreSQL
 veritabanı, güvenli raporlama görünümleri ve açık manifest eklenerek uyarlanabilir;
 LLM'in bütün rastgele veritabanını körlemesine yorumlamasına izin verilmez.
+
+MongoDB ek bir raporlama kaynağıdır; whitelist, mesaj kuyruğu, audit, rate-limit ve
+şifreleme canary'si PostgreSQL'de kalır. İki kaynak aynı anda etkin olduğunda tek
+federated reporting katmanı soruyu manifestteki mantıksal relation adına göre doğru
+kaynağa yönlendirir. MongoDB için her collection, alan, alan tipi ve iş açıklaması
+manifestte açıkça yazılmak zorundadır. Tam kurulum, örnek manifest, Atlas read-only
+rolü, indeksler, Render değişkenleri, yetkilendirme ve test adımları
+[docs/MONGODB_SETUP.md](docs/MONGODB_SETUP.md) içindedir.
 
 Manifest aynı zamanda açık bir insan-incelemeli güven sınırıdır. Kod doğrudan
 foreign table'ı reddeder, ancak bir view'ın içindeki FDW, volatile/security-definer
