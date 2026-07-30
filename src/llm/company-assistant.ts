@@ -610,9 +610,16 @@ function isCapabilityQuestion(value: string): boolean {
 
 function isModelIdentityQuestion(value: string): boolean {
   const command = normalizedRequest(value);
-  return /^(?:sen\s+)?(?:(?:hangi|ne)\s+(?:yapay\s+zeka\s+)?model(?:i|isin|sin)?(?:\s+kullaniyorsun)?|(?:yapay\s+zeka\s+)?model(?:in|i)?\s+ne)$|^what\s+(?:ai\s+)?model\s+are\s+you(?:\s+using)?$|^which\s+(?:ai\s+)?model\s+do\s+you\s+use$/u.test(
-    command
-  );
+  if (!/\b(?:model\w*|llm)\b/u.test(command)) return false;
+  const secondPersonCue =
+    /\b(?:sen|senin|kullaniyorsun|kullandigin|kullaniyorsunuz|kullandiginiz|you|your|powered)\b/u.test(
+      command
+    );
+  const directIdentityQuestion =
+    /^(?:(?:hangi|ne)\s+)?(?:(?:yapay\s+zeka|ai|dil)\s+)?model\w*\s+(?:ne|nedir)$|^(?:model\w*|llm)\s+(?:ne|nedir)$/u.test(
+      command
+    );
+  return secondPersonCue || directIdentityQuestion;
 }
 
 function modelIdentityText(
