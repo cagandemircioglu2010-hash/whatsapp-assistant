@@ -56,6 +56,25 @@ type AnthropicErrorResponse = {
   };
 };
 
+const allowedAnthropicErrorTypes = new Set([
+  "api_error",
+  "authentication_error",
+  "billing_error",
+  "invalid_request_error",
+  "not_found_error",
+  "overloaded_error",
+  "permission_error",
+  "rate_limit_error",
+  "request_too_large",
+  "timeout_error"
+]);
+
+function safeAnthropicErrorType(value: unknown): string {
+  return typeof value === "string" && allowedAnthropicErrorTypes.has(value)
+    ? value
+    : "unknown_error";
+}
+
 export class AnthropicApiError extends Error {
   readonly loggableDetails: {
     provider: "anthropic";
@@ -63,13 +82,14 @@ export class AnthropicApiError extends Error {
     errorType: string;
   };
 
-  constructor(status: number, errorType: string) {
-    super(`Anthropic API request failed with status ${status} (${errorType})`);
+  constructor(status: number, errorType: unknown) {
+    const safeErrorType = safeAnthropicErrorType(errorType);
+    super(`Anthropic API request failed with status ${status} (${safeErrorType})`);
     this.name = "AnthropicApiError";
     this.loggableDetails = {
       provider: "anthropic",
       status,
-      errorType
+      errorType: safeErrorType
     };
   }
 }
@@ -198,12 +218,10 @@ export class AnthropicMessagesGateway implements LlmGateway {
 
     if (!response.ok) {
       const responseText = await response.text();
-      let errorType = "unknown_error";
+      let errorType: unknown = "unknown_error";
       try {
         const payload = JSON.parse(responseText) as AnthropicErrorResponse;
-        if (typeof payload.error?.type === "string" && payload.error.type.length <= 100) {
-          errorType = payload.error.type;
-        }
+        errorType = payload.error?.type;
       } catch {
         // Free-form provider bodies are intentionally excluded from production
         // logs. The status plus a bounded structured type are sufficient for
