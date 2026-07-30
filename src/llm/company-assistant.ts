@@ -34,6 +34,17 @@ function localTimestamp(timezone: string): string {
   }).format(new Date());
 }
 
+function localIsoDate(timezone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date());
+  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${value.year}-${value.month}-${value.day}`;
+}
+
 function instructions(
   timezone: string,
   generalChatEnabled: boolean,
@@ -235,11 +246,15 @@ function isContextualFollowUp(value: string): boolean {
     /^(?:ve|peki|ayrica|ayrıca|bir\s+de|bunu|bunlari|bunları|onlari|onları|ayni|aynı|then|also|and|what\s+about)\b/u.test(
       normalized
     );
-  const hasBusinessSubjectOrAction =
-    /\b(?:satis\w*|sales|gelir\w*|revenue|ciro\w*|proje\w*|projects?|gorev\w*|tasks?|musteri\w*|customers?|rapor\w*|reports?|hesapla\w*|calculate|compute|topla\w*|sum|bul\w*|find|getir\w*|fetch)\b/u.test(
+  const periodOnlyReference =
+    /^(?:ayni|same)\s+(?:(?:tarih|date)\s+)?(?:aralig\w*|range|donem\w*|period)(?:\s+(?:icin|for))?$/u.test(
       normalized
     );
-  return startsAsFollowUp && hasBusinessSubjectOrAction;
+  const hasBusinessSubjectOrAction =
+    /\b(?:satis\w*|sales|gelir\w*|revenue|ciro\w*|iade\w*|refunds?|returns?|proje\w*|projects?|gorev\w*|tasks?|musteri\w*|customers?|rapor\w*|reports?|hesapla\w*|calculate|compute|topla\w*|sum|bul\w*|find|getir\w*|fetch)\b/u.test(
+      normalized
+    );
+  return periodOnlyReference || (startsAsFollowUp && hasBusinessSubjectOrAction);
 }
 
 function priorInboundForFollowUp(context: AssistantContext): string | null {
@@ -275,6 +290,29 @@ function resolveContextualRequest(
     };
   }
   return { text: current, usedHistory: false };
+}
+
+function withDefaultReportingPeriod(value: string, timezone: string): string {
+  const normalized = normalizedRequest(value);
+  const isSalesOrRefundRequest =
+    /\b(?:satis\w*|sales|gelir\w*|revenue|ciro\w*|iade\w*|refunds?|returns?)\b/u.test(
+      normalized
+    );
+  const hasExplicitPeriod =
+    /\b(?:bugun|today|dun|yesterday|bu\s+(?:ay|hafta|yil)|this\s+(?:month|week|year)|gecen\s+(?:ay|hafta|yil)|last\s+(?:month|week|year|\d+\s+days?)|son\s+\d+\s+gun|ocak|subat|mart|nisan|mayis|haziran|temmuz|agustos|eylul|ekim|kasim|aralik|january|february|march|april|may|june|july|august|september|october|november|december)\b/u.test(
+      normalized
+    ) ||
+    /\b(?:19|20)\d{2}(?:[-/.]\d{1,2}(?:[-/.]\d{1,2})?)?\b/u.test(normalized) ||
+    /\b\d{1,2}[-/.]\d{1,2}(?:[-/.](?:19|20)?\d{2})?\b/u.test(normalized);
+  if (!isSalesOrRefundRequest || hasExplicitPeriod) return value;
+
+  const endDate = localIsoDate(timezone);
+  const startDate = `${endDate.slice(0, 4)}-01-01`;
+  return (
+    `${value}\n` +
+    `Tarih belirtilmediği için varsayılan güncel yıl dönemi: ${startDate} - ${endDate}. ` +
+    "Bu aralığı güncel yetkili araçtan yeniden sorgula; eski cevap değerlerini tekrar kullanma."
+  );
 }
 
 type NoDataReason = "denied" | "failed" | "unsupported";
@@ -372,7 +410,7 @@ function companyDataRequested(value: string): boolean {
   if (genericKnowledgeRequest && !explicitCompanyContext) return false;
 
   const businessSubject =
-    /\b(satis\w*|sales|gelir\w*|revenue|ciro\w*|kar\w*|profit|proje\w*|projects?|gorev\w*|tasks?|musteri\w*|customers?|fatura\w*|invoices?|siparis\w*|orders?|stok\w*|stock|inventory|donusum\w*|conversion|departman\w*|departments?|kpi|metrik\w*|metrics?|rapor\w*|reports?)\b/.test(
+    /\b(satis\w*|sales|gelir\w*|revenue|ciro\w*|iade\w*|refunds?|returns?|kar\w*|profit|proje\w*|projects?|gorev\w*|tasks?|musteri\w*|customers?|fatura\w*|invoices?|siparis\w*|orders?|stok\w*|stock|inventory|donusum\w*|conversion|departman\w*|departments?|kpi|metrik\w*|metrics?|rapor\w*|reports?)\b/.test(
       normalized
     );
   const dataQualifier =
@@ -747,6 +785,9 @@ export class CompanyLlmAssistant implements AssistantResponder {
     const companyDataTurn = this.options.generalChatEnabled
       ? companyDataRequested(resolvedRequest.text)
       : true;
+    const providerRequestText = companyDataTurn
+      ? withDefaultReportingPeriod(resolvedRequest.text, this.options.timezone)
+      : resolvedRequest.text;
     const seenCallIds = new Set<string>();
 
     try {
@@ -782,7 +823,7 @@ export class CompanyLlmAssistant implements AssistantResponder {
       }
       inputItems.push({
         role: "user",
-        content: [{ type: "input_text", text: resolvedRequest.text }]
+        content: [{ type: "input_text", text: providerRequestText }]
       });
 
       while (true) {

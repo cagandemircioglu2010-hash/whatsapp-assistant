@@ -1083,6 +1083,65 @@ describe("LLM company assistant", () => {
     expect(providerInput).not.toContain("2 satış bulundu");
   });
 
+  it("defaults a date-less refund request to the current year and requires company grounding", async () => {
+    const gateway = new TwoTurnGateway();
+    const sessions = new FakeSessionFactory();
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions,
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "refund-user", department: "Sales", role: "employee" },
+      "İade tutarı ne kadar?",
+      { messageId: "message-refund" }
+    );
+
+    expect(result).toMatchObject({ outcome: "success", kind: "business" });
+    expect(gateway.requests[0]?.toolChoice).toBe("required");
+    const providerInput = JSON.stringify(gateway.requests[0]?.inputItems.at(-1));
+    expect(providerInput).toContain("İade tutarı ne kadar?");
+    expect(providerInput).toContain("varsayılan güncel yıl dönemi");
+    expect(providerInput).toMatch(/\d{4}-01-01 - \d{4}-\d{2}-\d{2}/);
+  });
+
+  it("resolves a same-period follow-up from inbound context without replaying protected output", async () => {
+    const gateway = new TwoTurnGateway();
+    const sessions = new FakeSessionFactory();
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions,
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "same-period-user", department: "Sales", role: "employee" },
+      "Aynı tarih aralığı.",
+      {
+        messageId: "message-same-period",
+        history: [
+          { direction: "inbound", text: "İade tutarı ne kadar?" },
+          { direction: "outbound", text: "GİZLİ ESKİ İADE: 999999 TRY" }
+        ]
+      }
+    );
+
+    expect(result).toMatchObject({ outcome: "success", kind: "business" });
+    expect(gateway.requests[0]?.toolChoice).toBe("required");
+    const providerInput = JSON.stringify(gateway.requests[0]?.inputItems.at(-1));
+    expect(providerInput).toContain("İade tutarı ne kadar?");
+    expect(providerInput).toContain("Aynı tarih aralığı.");
+    expect(providerInput).toContain("varsayılan güncel yıl dönemi");
+    expect(JSON.stringify(gateway.requests[0]?.inputItems)).not.toContain("GİZLİ ESKİ İADE");
+  });
+
   it("asks for the desired dataset when a bare company-data scope has no prior request", async () => {
     const gateway = new DirectAnswerGateway("unused");
     const sessions = new FakeSessionFactory();
