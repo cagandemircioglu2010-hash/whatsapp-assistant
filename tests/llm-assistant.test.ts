@@ -677,8 +677,10 @@ describe("LLM company assistant", () => {
     expect(result).toMatchObject({ outcome: "success", kind: "business" });
     expect(result.text).toContain("Onaylı veritabanı şeması:");
     expect(result.text).toContain(
-      "assistant_reporting.active_projects: name, overdue_task_count"
+      "assistant_reporting.active_projects"
     );
+    expect(result.text).toContain("• name");
+    expect(result.text).toContain("• overdue_task_count");
     expect(result.text).not.toContain("ARBITRARY SECRET");
   });
 
@@ -744,7 +746,7 @@ describe("LLM company assistant", () => {
     );
 
     expect(result).toEqual({
-      text: "Genel sohbet, bilgi, matematik, yazım ve çeviri sorularını yanıtlayabilirim. Yetkinize göre ayrıca “satış özeti”, “aktif projeler” ve “geciken görevler” sorgularını çalıştırabilirim.",
+      text: "Genel sorular, bilgi, matematik, yazım, çeviri ve gündelik sohbet konusunda yardımcı olabilirim. Yetkinize göre ayrıca “satış özeti”, “aktif projeler” ve “geciken görevler” sorgularını çalıştırabilirim.",
       resource: null,
       resources: [],
       outcome: "success",
@@ -752,6 +754,93 @@ describe("LLM company assistant", () => {
     });
     expect(gateway.requests).toHaveLength(0);
     expect(sessions.actorId).toBeNull();
+  });
+
+  it.each(["özelliklerin neler", "Ne yapabilirsin?", "what can you do"])(
+    "answers capability questions deterministically without spending a model request: %s",
+    async (prompt) => {
+      const gateway = new DirectAnswerGateway("unused");
+      const sessions = new FakeSessionFactory();
+      const assistant = new CompanyLlmAssistant({
+        gateway,
+        sessions,
+        safetyIdentifierSecret: "s".repeat(32),
+        timezone: "Europe/Istanbul",
+        maxToolCalls: 4,
+        generalChatEnabled: true,
+        schemaDiscoveryEnabled: true
+      });
+
+      const result = await assistant.handle(
+        { id: "capabilities-user", department: null, role: "employee", locale: "tr" },
+        prompt,
+        { messageId: "message-capabilities" }
+      );
+
+      expect(result).toMatchObject({ outcome: "success", kind: "conversation" });
+      expect(result.text).toContain("gündelik sohbet");
+      expect(result.text).toContain("salt-okunur");
+      expect(gateway.requests).toHaveLength(0);
+      expect(sessions.actorId).toBeNull();
+    }
+  );
+
+  it.each(["yapay zeka modeli ne?", "modelin ne", "which AI model do you use"])(
+    "answers configured model identity safely without using a company tool: %s",
+    async (prompt) => {
+      const gateway = new DirectAnswerGateway("unused");
+      const sessions = new FakeSessionFactory();
+      const assistant = new CompanyLlmAssistant({
+        gateway,
+        sessions,
+        safetyIdentifierSecret: "s".repeat(32),
+        timezone: "Europe/Istanbul",
+        maxToolCalls: 4,
+        generalChatEnabled: true,
+        provider: "anthropic",
+        model: "claude-sonnet-5"
+      });
+
+      const result = await assistant.handle(
+        { id: "identity-user", department: null, role: "employee", locale: "tr" },
+        prompt,
+        { messageId: "message-identity" }
+      );
+
+      expect(result).toEqual({
+        text: "Anthropic claude-sonnet-5 modeliyle çalışıyorum. Şirket bilgilerini ise yalnızca yetkinize göre açılan salt-okunur veri araçlarından alıyorum.",
+        resource: null,
+        resources: [],
+        outcome: "success",
+        kind: "conversation"
+      });
+      expect(gateway.requests).toHaveLength(0);
+      expect(sessions.actorId).toBeNull();
+    }
+  );
+
+  it("allows harmless unclassified conversation while preserving tool-gated company facts", async () => {
+    const gateway = new DirectAnswerGateway("Ben şirket içi bir WhatsApp asistanıyım.");
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions: new FakeSessionFactory(),
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "intro-user", department: null, role: "employee" },
+      "Kendini kısaca tanıt",
+      { messageId: "message-intro" }
+    );
+
+    expect(result).toMatchObject({
+      text: "Ben şirket içi bir WhatsApp asistanıyım.",
+      outcome: "success",
+      kind: "conversation"
+    });
   });
 
   it("omits disabled fixed reports from the schema-only hybrid menu", async () => {
@@ -774,7 +863,7 @@ describe("LLM company assistant", () => {
       { messageId: "message-schema-menu" }
     );
 
-    expect(result.text).toContain("Genel sohbet");
+    expect(result.text).toContain("gündelik sohbet");
     expect(result.text).toContain("onaylı alanları");
     expect(result.text).not.toMatch(/satış özeti|aktif projeler|geciken görevler/);
     expect(gateway.requests).toHaveLength(0);

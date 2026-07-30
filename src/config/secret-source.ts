@@ -9,7 +9,8 @@ export function hydrateSecretFiles(environment: NodeJS.ProcessEnv): NodeJS.Proce
     ["IDENTIFIER_HASH_KEYS", "IDENTIFIER_HASH_KEYS_FILE"],
     ["AUDIT_INTEGRITY_KEYS", "AUDIT_INTEGRITY_KEYS_FILE"],
     ["DATABASE_CA_CERT", "DATABASE_CA_CERT_FILE"],
-    ["COMPANY_DATABASE_CA_CERT", "COMPANY_DATABASE_CA_CERT_FILE"]
+    ["COMPANY_DATABASE_CA_CERT", "COMPANY_DATABASE_CA_CERT_FILE"],
+    ["MONGODB_URI", "MONGODB_URI_FILE"]
   ] as const;
 
   for (const [valueName, fileName] of pairs) {

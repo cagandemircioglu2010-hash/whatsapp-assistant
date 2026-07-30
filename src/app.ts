@@ -1,4 +1,5 @@
 import Fastify, { type FastifyError, type FastifyRequest } from "fastify";
+import type { Db } from "mongodb";
 import type { Pool } from "pg";
 import type { Logger } from "pino";
 import { AuthorizationService } from "./auth/authorization.service.js";
@@ -19,7 +20,8 @@ import { GeminiChatCompletionsGateway } from "./llm/gemini-chat-completions.gate
 import { AnthropicMessagesGateway } from "./llm/anthropic-messages.gateway.js";
 import { CompanyMcpSessionFactory } from "./mcp/session.js";
 import { CompanyReportRepository } from "./reports/company-report.repository.js";
-import { SchemaQueryRepository } from "./reports/schema-query.repository.js";
+import { createReportingQueries } from "./reports/reporting-query.factory.js";
+import type { ReportingQueries } from "./reports/schema-query.repository.js";
 import { ReportCommandRouter } from "./reports/report-command-router.js";
 import { WhatsAppApiError, WhatsAppClient } from "./whatsapp/client.js";
 import { registerWhatsAppRoutes } from "./whatsapp/routes.js";
@@ -42,6 +44,7 @@ type AppDependencies = {
   config: AppConfig;
   appPool: Pool;
   companyReadonlyPool: Pool;
+  mongoDatabase?: Db;
   logger: Logger;
 };
 
@@ -120,6 +123,16 @@ export async function buildApp(dependencies: AppDependencies) {
   const reports = new CompanyReportRepository(dependencies.companyReadonlyPool);
   const authorization = new AuthorizationService(permissions);
   const reportRouter = new ReportCommandRouter(reports, authorization, dependencies.config.companyTimezone);
+  const reportingQueries: ReportingQueries | undefined =
+    dependencies.config.llm.schemaDiscoveryEnabled
+      ? createReportingQueries({
+          postgresPool: dependencies.companyReadonlyPool,
+          ...(dependencies.mongoDatabase ? { mongoDatabase: dependencies.mongoDatabase } : {}),
+          allowedSchemas: dependencies.config.llm.schemaAllowedSchemas,
+          relationManifest: dependencies.config.llm.schemaRelationManifest,
+          mongoQueryTimeoutMs: dependencies.config.mongodb.queryTimeoutMs
+        })
+      : undefined;
   const deterministicResponder: AssistantResponder = dependencies.config.companyReportsEnabled
     ? reportRouter
     : {
@@ -148,13 +161,6 @@ export async function buildApp(dependencies: AppDependencies) {
               ...commonGatewayOptions,
               reasoningEffort: dependencies.config.llm.reasoningEffort
             });
-    const reportingQueries = dependencies.config.llm.schemaDiscoveryEnabled
-      ? new SchemaQueryRepository(
-          dependencies.companyReadonlyPool,
-          dependencies.config.llm.schemaAllowedSchemas,
-          dependencies.config.llm.schemaRelationManifest
-        )
-      : undefined;
     const mcpSessions = new CompanyMcpSessionFactory({
       reports,
       actorProvider: (actor) => users.findActiveById(actor.id),
@@ -170,6 +176,8 @@ export async function buildApp(dependencies: AppDependencies) {
       timezone: dependencies.config.companyTimezone,
       maxToolCalls: dependencies.config.llm.maxToolCalls,
       generalChatEnabled: dependencies.config.llm.generalChatEnabled,
+      provider: dependencies.config.llm.provider,
+      model: dependencies.config.llm.model,
       reportsEnabled: dependencies.config.companyReportsEnabled,
       schemaDiscoveryEnabled: dependencies.config.llm.schemaDiscoveryEnabled
     });
@@ -385,7 +393,8 @@ export async function buildApp(dependencies: AppDependencies) {
           reportsEnabled: dependencies.config.companyReportsEnabled,
           schemaDiscoveryEnabled: dependencies.config.llm.schemaDiscoveryEnabled,
           allowedSchemas: dependencies.config.llm.schemaAllowedSchemas,
-          relationManifest: dependencies.config.llm.schemaRelationManifest
+          relationManifest: dependencies.config.llm.schemaRelationManifest,
+          ...(reportingQueries ? { reportingQueries } : {})
         }
       );
       const healthy =

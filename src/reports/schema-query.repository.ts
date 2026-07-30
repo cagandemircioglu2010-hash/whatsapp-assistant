@@ -16,7 +16,15 @@ const identifierSchema = z
   .string()
   .min(1)
   .max(63)
-  .regex(/^[A-Za-z_][A-Za-z0-9_$]*$/, "Use an exact column or output name from the schema tool");
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Use a safe output name");
+const fieldPathSchema = z
+  .string()
+  .min(1)
+  .max(127)
+  .regex(
+    /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/,
+    "Use an exact field name or dotted path from the schema tool"
+  );
 const relationSchema = z
   .string()
   .min(1)
@@ -40,7 +48,7 @@ export type ReportingSchemaInput = z.infer<typeof reportingSchemaInputSchema>;
 
 export const reportingFilterSchema = z
   .object({
-    column: identifierSchema,
+    column: fieldPathSchema,
     operator: z.enum([
       "eq",
       "ne",
@@ -62,23 +70,23 @@ export const reportingFilterSchema = z
 export const reportingAggregateSchema = z
   .object({
     function: z.enum(["count", "sum", "avg", "min", "max"]),
-    column: identifierSchema.nullable(),
+    column: fieldPathSchema.nullable(),
     alias: identifierSchema
   })
   .strict();
 
 export const reportingOrderSchema = z
   .object({
-    target: identifierSchema,
+    target: fieldPathSchema,
     direction: z.enum(["asc", "desc"])
   })
   .strict();
 
 export const reportingQueryInputShape = {
   relation: relationSchema,
-  columns: z.array(identifierSchema).max(12),
+  columns: z.array(fieldPathSchema).max(12),
   filters: z.array(reportingFilterSchema).max(8),
-  group_by: z.array(identifierSchema).max(5),
+  group_by: z.array(fieldPathSchema).max(5),
   aggregates: z.array(reportingAggregateSchema).max(5),
   order_by: z.array(reportingOrderSchema).max(3),
   limit: z.number().int().min(1).max(50)
@@ -92,11 +100,14 @@ export type ReportingSchema = {
   schemas: string[];
   relations: Array<{
     name: string;
-    kind: "table" | "view" | "foreign_table";
+    source?: "postgres" | "mongodb";
+    description?: string;
+    kind: "table" | "view" | "foreign_table" | "collection";
     columns: Array<{
       name: string;
       dataType: string;
       nullable: boolean;
+      description?: string;
     }>;
     queryPolicy: {
       requiresFilter: boolean;
@@ -380,12 +391,28 @@ export class SchemaQueryRepository implements ReportingQueries {
       throw new Error("At least one and at most fifty relation policies are required");
     }
     this.policies = new Map(
-      relationManifest.map((policy) => [policy.relation, { ...policy, columns: [...policy.columns] }])
+      relationManifest.map((policy) => [
+        policy.relation,
+        {
+          ...policy,
+          columns: [...policy.columns],
+          filterColumns: [...policy.filterColumns],
+          fieldDescriptions: { ...(policy.fieldDescriptions ?? {}) },
+          fieldTypes: { ...(policy.fieldTypes ?? {}) }
+        }
+      ])
     );
     if (this.policies.size !== relationManifest.length) {
       throw new Error("Relation policies must be unique");
     }
     const allowed = new Set(this.allowedSchemas);
+    if (
+      [...this.policies.values()].some(
+        (policy) => (policy.source ?? "postgres") !== "postgres"
+      )
+    ) {
+      throw new Error("SchemaQueryRepository accepts PostgreSQL relation policies only");
+    }
     if ([...this.policies.keys()].some((name) => !allowed.has(name.split(".")[0]!))) {
       throw new Error("Every relation policy must belong to an allowed schema");
     }
@@ -447,11 +474,16 @@ export class SchemaQueryRepository implements ReportingQueries {
       const policy = this.policies.get(`${relation.schema}.${relation.name}`)!;
       const candidate = {
         name: `${relation.schema}.${relation.name}`,
+        source: "postgres" as const,
+        ...(policy.description ? { description: policy.description } : {}),
         kind: relation.kind,
         columns: [...relation.columns.values()].map((column) => ({
           name: column.name,
           dataType: column.dataType,
-          nullable: column.nullable
+          nullable: column.nullable,
+          ...(policy.fieldDescriptions?.[column.name]
+            ? { description: policy.fieldDescriptions[column.name] }
+            : {})
         })),
         queryPolicy: {
           requiresFilter: !policy.allowUnfiltered,

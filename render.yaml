@@ -55,11 +55,25 @@ services:
         value: verify-full
       - key: COMPANY_REPORTS_ENABLED
         value: "true"
+      # MongoDB is an optional additional read-only reporting source. Leave
+      # disabled until its URI, database and reviewed manifest are configured.
+      - key: MONGODB_ENABLED
+        value: "false"
+      - key: MONGODB_CONNECT_TIMEOUT_MS
+        value: "5000"
+      - key: MONGODB_QUERY_TIMEOUT_MS
+        value: "2000"
+      - key: MONGODB_MAX_POOL_SIZE
+        value: "5"
       # Everything below is a secret or account-specific: fill in the
       # dashboard (npm run setup:env -- --render prints ready-made values).
       - key: DATABASE_URL
         sync: false
       - key: COMPANY_READONLY_DATABASE_URL
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DATABASE
         sync: false
       - key: IDENTIFIER_HASH_ACTIVE_KEY_ID
         sync: false
@@ -94,7 +108,8 @@ services:
       - key: LLM_SCHEMA_ALLOWED_SCHEMAS
         value: assistant_reporting
       # The app's reviewed three-view manifest is the default. Set
-      # LLM_SCHEMA_RELATION_MANIFEST explicitly for any other database schema.
+      # LLM_SCHEMA_RELATION_MANIFEST explicitly for another PostgreSQL schema
+      # or any MongoDB collection.
       - key: LLM_PROVIDER
         sync: false
       - key: ANTHROPIC_API_KEY

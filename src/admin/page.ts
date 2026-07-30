@@ -118,7 +118,10 @@ function escapeHtml(value: string): string {
 }
 
 function permissionName(permission: string): string {
-  return permissionLabels[permission] ?? permission;
+  return permissionLabels[permission] ??
+    (permission.startsWith("company.database.relation.")
+      ? `Data: ${permission.slice("company.database.relation.".length).replace(/[._-]+/g, " ")}`
+      : permission);
 }
 
 function resultNotice(result: string | undefined): string {
@@ -209,6 +212,7 @@ function userCard(user: AdminWhitelistUser, csrfToken: string): string {
 export function renderAdminPage(input: {
   users: AdminWhitelistUser[];
   csrfToken: string;
+  availablePermissions?: readonly string[] | undefined;
   result?: string | undefined;
   error?: string | undefined;
 }): string {
@@ -218,6 +222,13 @@ export function renderAdminPage(input: {
   const error = input.error
     ? `<div class="notice error" role="alert">${escapeHtml(input.error)}</div>`
     : "";
+  const availablePermissions = input.availablePermissions ?? Object.keys(permissionLabels);
+  const permissionCheckboxes = availablePermissions
+    .map(
+      (permission) =>
+        `<label class="check"><input type="checkbox" name="permissions" value="${escapeHtml(permission)}"> ${escapeHtml(permissionName(permission))}</label>`
+    )
+    .join("");
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -286,10 +297,7 @@ export function renderAdminPage(input: {
           <fieldset>
             <legend>Company-data permissions</legend>
             <div class="checks">
-              <label class="check"><input type="checkbox" name="permissions" value="company.sales"> Sales summaries</label>
-              <label class="check"><input type="checkbox" name="permissions" value="company.projects"> Project information</label>
-              <label class="check"><input type="checkbox" name="permissions" value="company.tasks"> Task information</label>
-              <label class="check"><input type="checkbox" name="permissions" value="company.database.explore"> Approved database explorer</label>
+              ${permissionCheckboxes}
             </div>
             <p class="hint">Database explorer requires the Executive or Admin role. Leave all unchecked for chat-only access.</p>
           </fieldset>

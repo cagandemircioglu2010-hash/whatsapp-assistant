@@ -16,8 +16,28 @@ describe("whitelist administration configuration", () => {
       port: 3001,
       databaseUrl: baseEnvironment.DATABASE_ADMIN_URL,
       databaseTls: false,
-      defaultPhoneCountry: "TR"
+      defaultPhoneCountry: "TR",
+      additionalPermissions: []
     });
+  });
+
+  it("accepts only explicit relation permissions for additional data sources", () => {
+    expect(
+      loadWhitelistAdminConfig({
+        ...baseEnvironment,
+        WHITELIST_ADDITIONAL_PERMISSIONS:
+          "company.database.relation.customer-metrics,company.database.relation.inventory"
+      }).additionalPermissions
+    ).toEqual([
+      "company.database.relation.customer-metrics",
+      "company.database.relation.inventory"
+    ]);
+    expect(() =>
+      loadWhitelistAdminConfig({
+        ...baseEnvironment,
+        WHITELIST_ADDITIONAL_PERMISSIONS: "company.secret"
+      })
+    ).toThrow("company.database.relation");
   });
 
   it("requires a long password and verified TLS in production", () => {

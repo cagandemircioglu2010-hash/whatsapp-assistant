@@ -269,6 +269,49 @@ describe("whitelist administration HTTP app", () => {
     ]);
   });
 
+  it("can expose and assign an explicitly configured MongoDB relation permission", async () => {
+    const store = new FakeStore();
+    const instance = await buildWhitelistAdminApp({
+      store,
+      password,
+      logger: createLogger("silent"),
+      additionalPermissions: ["company.database.relation.customer-metrics"]
+    });
+    apps.push(instance);
+    const page = await instance.inject({
+      method: "GET",
+      url: "/",
+      headers: { authorization }
+    });
+    expect(page.body).toContain("company.database.relation.customer-metrics");
+    expect(page.body).toContain("Data: customer metrics");
+
+    const response = await instance.inject({
+      method: "POST",
+      url: "/users",
+      headers: {
+        authorization,
+        "content-type": "application/x-www-form-urlencoded"
+      },
+      payload: new URLSearchParams([
+        ["csrf", csrfFrom(page.body)],
+        ["name", "Mongo Tester"],
+        ["phone", "+90 530 111 22 33"],
+        ["department", "Executive"],
+        ["role", "executive"],
+        ["locale", "tr"],
+        ["permissions", "company.database.explore"],
+        ["permissions", "company.database.relation.customer-metrics"]
+      ]).toString()
+    });
+
+    expect(response.statusCode).toBe(303);
+    expect(store.upserts[0]?.permissions).toEqual([
+      "company.database.explore",
+      "company.database.relation.customer-metrics"
+    ]);
+  });
+
   it("rejects missing form tokens, unknown permissions, and cross-site mutations", async () => {
     const { instance, store } = await app();
     const missingToken = await instance.inject({

@@ -1,5 +1,8 @@
 import type { Pool } from "pg";
-import { SchemaQueryRepository } from "../reports/schema-query.repository.js";
+import {
+  SchemaQueryRepository,
+  type ReportingQueries
+} from "../reports/schema-query.repository.js";
 import {
   DEFAULT_REPORTING_RELATION_MANIFEST,
   type ReportingRelationPolicy
@@ -23,6 +26,7 @@ export type CompanyDataReadinessOptions = {
   schemaDiscoveryEnabled?: boolean;
   allowedSchemas?: readonly string[];
   relationManifest?: readonly ReportingRelationPolicy[];
+  reportingQueries?: ReportingQueries;
 };
 
 function dataReadinessOptions(options: CompanyDataReadinessOptions = {}) {
@@ -30,7 +34,8 @@ function dataReadinessOptions(options: CompanyDataReadinessOptions = {}) {
     reportsEnabled: options.reportsEnabled ?? true,
     schemaDiscoveryEnabled: options.schemaDiscoveryEnabled ?? false,
     allowedSchemas: options.allowedSchemas ?? ["assistant_reporting"],
-    relationManifest: options.relationManifest ?? DEFAULT_REPORTING_RELATION_MANIFEST
+    relationManifest: options.relationManifest ?? DEFAULT_REPORTING_RELATION_MANIFEST,
+    reportingQueries: options.reportingQueries
   };
 }
 
@@ -50,11 +55,15 @@ async function companyDataReady(
     reportsReady = result.rows[0]?.ready === true;
   }
   if (selected.schemaDiscoveryEnabled) {
-    schemaReady = await new SchemaQueryRepository(
-      companyPool,
-      selected.allowedSchemas,
-      selected.relationManifest
-    ).isReady();
+    schemaReady = selected.reportingQueries
+      ? await selected.reportingQueries.isReady()
+      : await new SchemaQueryRepository(
+          companyPool,
+          selected.allowedSchemas,
+          selected.relationManifest.filter(
+            (policy) => (policy.source ?? "postgres") === "postgres"
+          )
+        ).isReady();
   }
   return reportsReady && schemaReady;
 }
@@ -65,7 +74,10 @@ function companyReadinessKey(options: CompanyDataReadinessOptions): string {
     reportsEnabled: selected.reportsEnabled,
     schemaDiscoveryEnabled: selected.schemaDiscoveryEnabled,
     allowedSchemas: selected.allowedSchemas,
-    relationManifest: selected.relationManifest
+    relationManifest: selected.relationManifest,
+    providerRelations: selected.reportingQueries
+      ?.relationPolicies()
+      .map((policy) => `${policy.source ?? "postgres"}:${policy.relation}`)
   });
 }
 

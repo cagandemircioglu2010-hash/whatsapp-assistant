@@ -17,6 +17,27 @@ const analyticsManifest = JSON.stringify([
     allowUnfiltered: true
   }
 ]);
+const hybridManifest = JSON.stringify([
+  ...JSON.parse(analyticsManifest),
+  {
+    source: "mongodb",
+    relation: "mongo_reporting.customer_metrics",
+    collection: "customer_metrics",
+    description: "Monthly customer revenue metrics.",
+    columns: ["customer.name", "revenue"],
+    fieldDescriptions: {
+      "customer.name": "Customer display name.",
+      revenue: "Net completed revenue."
+    },
+    fieldTypes: {
+      "customer.name": "string",
+      revenue: "number"
+    },
+    filterColumns: ["customer.name"],
+    resource: "company.database.relation.customer-metrics",
+    allowUnfiltered: false
+  }
+]);
 
 describe("application configuration", () => {
   it("requires the selected provider key only when the LLM is enabled", () => {
@@ -62,10 +83,10 @@ describe("application configuration", () => {
     ).toThrow("At least one company data mode must be enabled");
     expect(() =>
       loadConfig({ ...baseEnvironment, LLM_SCHEMA_ALLOWED_SCHEMAS: "pg_catalog" })
-    ).toThrow("non-system PostgreSQL schema names");
+    ).toThrow("non-system logical schema names");
     expect(() =>
       loadConfig({ ...baseEnvironment, LLM_SCHEMA_ALLOWED_SCHEMAS: "public" })
-    ).toThrow("non-system PostgreSQL schema names");
+    ).toThrow("non-system logical schema names");
     expect(() => loadConfig({ ...baseEnvironment, LLM_PROVIDER: "unsupported" })).toThrow();
     expect(() =>
       loadConfig({
@@ -225,6 +246,66 @@ describe("application configuration", () => {
     expect(() => loadConfig({ ...baseEnvironment, DATABASE_URL: "https://example.com/database" })).toThrow(
       "PostgreSQL"
     );
+  });
+
+  it("enables MongoDB only with schema discovery, a secure connection and approved collections", () => {
+    const loaded = loadConfig({
+      ...baseEnvironment,
+      MONGODB_ENABLED: "true",
+      MONGODB_URI: "mongodb+srv://reader:password@cluster.example/",
+      MONGODB_DATABASE: "company_reporting",
+      LLM_ENABLED: "true",
+      LLM_SCHEMA_DISCOVERY_ENABLED: "true",
+      LLM_GENERAL_CHAT_ENABLED: "true",
+      LLM_SCHEMA_ALLOWED_SCHEMAS: "analytics,mongo_reporting",
+      LLM_SCHEMA_RELATION_MANIFEST: hybridManifest,
+      LLM_MAX_TOOL_CALLS: "4",
+      OPENAI_API_KEY: "test-key",
+      SAFETY_IDENTIFIER_SECRET: "s".repeat(32)
+    });
+
+    expect(loaded.mongodb).toEqual({
+      enabled: true,
+      uri: "mongodb+srv://reader:password@cluster.example/",
+      database: "company_reporting",
+      connectTimeoutMs: 5000,
+      queryTimeoutMs: 2000,
+      maxPoolSize: 5
+    });
+    expect(loaded.llm.schemaRelationManifest.map((policy) => policy.source)).toEqual([
+      "postgres",
+      "mongodb"
+    ]);
+
+    expect(() =>
+      loadConfig({
+        ...baseEnvironment,
+        MONGODB_ENABLED: "true",
+        MONGODB_URI: "mongodb://localhost:27017",
+        MONGODB_DATABASE: "company_reporting"
+      })
+    ).toThrow("requires LLM_ENABLED=true");
+    expect(() =>
+      loadConfig({
+        ...baseEnvironment,
+        MONGODB_ENABLED: "true",
+        MONGODB_URI: "mongodb+srv://reader:password@cluster.example/",
+        MONGODB_DATABASE: "company_reporting",
+        LLM_ENABLED: "true",
+        LLM_SCHEMA_DISCOVERY_ENABLED: "true",
+        LLM_SCHEMA_ALLOWED_SCHEMAS: "analytics",
+        LLM_SCHEMA_RELATION_MANIFEST: analyticsManifest,
+        OPENAI_API_KEY: "test-key",
+        SAFETY_IDENTIFIER_SECRET: "s".repeat(32)
+      })
+    ).toThrow("has no MongoDB relations");
+    expect(() =>
+      loadConfig({
+        ...baseEnvironment,
+        MONGODB_URI: "mongodb+srv://reader:password@cluster.example/",
+        MONGODB_DATABASE: "company_reporting"
+      })
+    ).toThrow("Set MONGODB_ENABLED=true");
   });
 
   it("rejects cross-purpose key reuse and connection-string session overrides in production", () => {

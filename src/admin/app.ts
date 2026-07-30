@@ -11,6 +11,7 @@ type AdminAppDependencies = {
   password: string;
   logger: Logger;
   production?: boolean;
+  additionalPermissions?: readonly string[];
 };
 
 type FormValue = string | string[];
@@ -27,12 +28,12 @@ const sessionTtlSeconds = 8 * 60 * 60;
 const maximumSessions = 64;
 const allowedRoles = new Set(["employee", "manager", "executive", "admin"]);
 const allowedLocales = new Set(["tr", "en"]);
-const allowedPermissions = new Set([
+const basePermissions = [
   "company.sales",
   "company.projects",
   "company.tasks",
   "company.database.explore"
-]);
+] as const;
 
 function parseFormBody(raw: string): FormBody {
   const body: FormBody = Object.create(null) as FormBody;
@@ -140,6 +141,16 @@ export async function buildWhitelistAdminApp(dependencies: AdminAppDependencies)
   });
   const loginBuckets = new Map<string, LoginBucket>();
   const sessions = new Map<string, number>();
+  const additionalPermissions = dependencies.additionalPermissions ?? [];
+  if (
+    additionalPermissions.length > 50 ||
+    additionalPermissions.some(
+      (resource) => !/^company\.database\.relation\.[a-z][a-z0-9_.-]+$/.test(resource)
+    )
+  ) {
+    throw new Error("Additional whitelist permissions are invalid");
+  }
+  const allowedPermissions = new Set([...basePermissions, ...additionalPermissions]);
   const csrfToken = createHmac("sha256", dependencies.password)
     .update("whitelist-admin-csrf-v1")
     .digest("base64url");
@@ -370,6 +381,7 @@ export async function buildWhitelistAdminApp(dependencies: AdminAppDependencies)
         renderAdminPage({
           users,
           csrfToken,
+          availablePermissions: [...allowedPermissions],
           ...(request.query.result ? { result: request.query.result } : {})
         })
       );
@@ -411,7 +423,14 @@ export async function buildWhitelistAdminApp(dependencies: AdminAppDependencies)
       return reply
         .code(400)
         .type("text/html; charset=utf-8")
-        .send(renderAdminPage({ users, csrfToken, error: safeInputMessage(error) }));
+        .send(
+          renderAdminPage({
+            users,
+            csrfToken,
+            availablePermissions: [...allowedPermissions],
+            error: safeInputMessage(error)
+          })
+        );
     }
   });
 

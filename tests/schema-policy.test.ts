@@ -16,6 +16,45 @@ describe("reporting relation manifest", () => {
       "assistant_reporting.overdue_tasks"
     ]);
     expect(manifest.every((policy) => policy.resource !== "company.database.explore")).toBe(true);
+    expect(manifest.every((policy) => policy.source === "postgres")).toBe(true);
+    expect(manifest.every((policy) => Boolean(policy.description))).toBe(true);
+    expect(
+      manifest.every((policy) =>
+        policy.columns.every((column) => Boolean(policy.fieldDescriptions?.[column]))
+      )
+    ).toBe(true);
+  });
+
+  it("accepts MongoDB collections only with explicit safe fields, types and descriptions", () => {
+    const manifest = parseReportingRelationManifest(
+      JSON.stringify([
+        {
+          source: "mongodb",
+          relation: "mongo_reporting.customer_metrics",
+          collection: "customer_metrics",
+          description: "Reviewed monthly customer performance documents.",
+          columns: ["customer.name", "revenue"],
+          fieldDescriptions: {
+            "customer.name": "Customer display name.",
+            revenue: "Net completed revenue after refunds."
+          },
+          fieldTypes: {
+            "customer.name": "string",
+            revenue: "number"
+          },
+          filterColumns: ["customer.name"],
+          resource: "company.database.relation.customer-metrics",
+          allowUnfiltered: false
+        }
+      ]),
+      ["mongo_reporting"]
+    );
+
+    expect(manifest[0]).toMatchObject({
+      source: "mongodb",
+      collection: "customer_metrics",
+      fieldTypes: { "customer.name": "string", revenue: "number" }
+    });
   });
 
   it("rejects broad, duplicate, malformed, and explorer-only policies", () => {
@@ -73,6 +112,42 @@ describe("reporting relation manifest", () => {
         }
       ])
     ).toThrow("unavailable filter column");
+    expect(() =>
+      parseReportingRelationManifest(
+        JSON.stringify([
+          {
+            source: "mongodb",
+            relation: "mongo_reporting.credentials",
+            collection: "credentials",
+            description: "Unsafe credential documents.",
+            columns: ["api_token"],
+            fieldDescriptions: { api_token: "A secret token that must be rejected." },
+            fieldTypes: { api_token: "string" },
+            resource: "company.database.relation.credentials",
+            allowUnfiltered: true
+          }
+        ]),
+        ["mongo_reporting"]
+      )
+    ).toThrow("blocked MongoDB field");
+    expect(() =>
+      parseReportingRelationManifest(
+        JSON.stringify([
+          {
+            source: "mongodb",
+            relation: "mongo_reporting.metrics",
+            collection: "metrics",
+            description: "Approved metrics.",
+            columns: ["revenue"],
+            fieldDescriptions: { revenue: "Completed revenue." },
+            fieldTypes: {},
+            resource: "company.database.relation.metrics",
+            allowUnfiltered: true
+          }
+        ]),
+        ["mongo_reporting"]
+      )
+    ).toThrow("Every approved MongoDB field");
   });
 
   it("rejects manifests that cannot be discovered within one message", () => {

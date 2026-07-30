@@ -19,6 +19,7 @@ export type WhitelistAdminConfig = {
   databaseTls: DatabaseTlsConfig;
   defaultPhoneCountry: CountryCode;
   password: string;
+  additionalPermissions: string[];
 };
 
 function looksWeak(value: string): boolean {
@@ -41,7 +42,8 @@ export function loadWhitelistAdminConfig(
       LOG_LEVEL: z.enum(logLevels).default("info"),
       DATABASE_ADMIN_URL: z.string().min(1),
       DEFAULT_PHONE_COUNTRY: z.string().length(2).default("TR"),
-      WHITELIST_ADMIN_PASSWORD: z.string().min(32).max(512)
+      WHITELIST_ADMIN_PASSWORD: z.string().min(32).max(512),
+      WHITELIST_ADDITIONAL_PERMISSIONS: z.string().max(8_000).default("")
     })
     .parse(hydrateSecretFiles(environment));
 
@@ -51,6 +53,24 @@ export function loadWhitelistAdminConfig(
   if (env.NODE_ENV === "production" && looksWeak(env.WHITELIST_ADMIN_PASSWORD)) {
     throw new Error("WHITELIST_ADMIN_PASSWORD is too predictable for production");
   }
+  const additionalPermissions = [
+    ...new Set(
+      env.WHITELIST_ADDITIONAL_PERMISSIONS
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean)
+    )
+  ];
+  if (
+    additionalPermissions.length > 50 ||
+    additionalPermissions.some(
+      (resource) => !/^company\.database\.relation\.[a-z][a-z0-9_.-]+$/.test(resource)
+    )
+  ) {
+    throw new Error(
+      "WHITELIST_ADDITIONAL_PERMISSIONS must contain at most 50 comma-separated company.database.relation.* resources"
+    );
+  }
   return {
     nodeEnv: env.NODE_ENV,
     host: env.HOST,
@@ -59,6 +79,7 @@ export function loadWhitelistAdminConfig(
     databaseUrl: env.DATABASE_ADMIN_URL,
     databaseTls: databaseTlsFromEnvironment(environment),
     defaultPhoneCountry: country as CountryCode,
-    password: env.WHITELIST_ADMIN_PASSWORD
+    password: env.WHITELIST_ADMIN_PASSWORD,
+    additionalPermissions
   };
 }
