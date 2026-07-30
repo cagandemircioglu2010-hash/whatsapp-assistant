@@ -16,6 +16,7 @@ export type LlmTurnRequest = {
   instructions: string;
   inputItems: unknown[];
   tools: LlmFunctionTool[];
+  toolChoice?: "auto" | "required";
   safetyIdentifier: string;
 };
 
