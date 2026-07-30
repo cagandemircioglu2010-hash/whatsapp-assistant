@@ -679,7 +679,7 @@ describe("LLM company assistant", () => {
 
     const result = await assistant.handle(
       { id: "schema-list-user", department: null, role: "admin" },
-      "Onaylı veritabanı şemasındaki tablo ve sütunları listele",
+      "Onaylı veritabanı tablolarını ve alan açıklamalarını özetle",
       { messageId: "message-schema-list" }
     );
 
