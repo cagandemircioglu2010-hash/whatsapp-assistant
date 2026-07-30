@@ -29,7 +29,7 @@ export class OpenAIResponsesGateway implements LlmGateway {
         instructions: request.instructions,
         input: request.inputItems as ResponseInput,
         tools: request.tools as FunctionTool[],
-        tool_choice: "auto",
+        tool_choice: request.toolChoice === "required" ? "required" : "auto",
         parallel_tool_calls: true,
         reasoning: { effort: this.options.reasoningEffort, context: "current_turn" },
         max_output_tokens: this.options.maxOutputTokens,
