@@ -164,11 +164,108 @@ export function toAnthropicMessages(request: LlmTurnRequest): AnthropicMessage[]
   return messages;
 }
 
+const unsupportedAnthropicStrictSchemaKeywords = new Set([
+  "minimum",
+  "maximum",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "multipleOf",
+  "minItems",
+  "maxItems"
+]);
+const forbiddenSchemaPointerTokens = new Set(["__proto__", "prototype", "constructor"]);
+const MAX_ANTHROPIC_SCHEMA_DEPTH = 64;
+const MAX_ANTHROPIC_SCHEMA_NODES = 10_000;
+
+function schemaPointerTokens(reference: string): string[] {
+  if (!reference.startsWith("#/")) {
+    throw new Error("Anthropic tool schemas only support local JSON Schema references");
+  }
+  return reference
+    .slice(2)
+    .split("/")
+    .map((token) => token.replace(/~1/g, "/").replace(/~0/g, "~"));
+}
+
+function resolveSchemaReference(root: unknown, reference: string): unknown {
+  let current = root;
+  for (const token of schemaPointerTokens(reference)) {
+    if (forbiddenSchemaPointerTokens.has(token)) {
+      throw new Error("Anthropic tool schema reference contains a forbidden path");
+    }
+    if (Array.isArray(current)) {
+      if (!/^(?:0|[1-9]\d*)$/.test(token)) {
+        throw new Error("Anthropic tool schema reference contains an invalid array index");
+      }
+      current = current[Number(token)];
+    } else if (isRecord(current) && Object.hasOwn(current, token)) {
+      current = current[token];
+    } else {
+      throw new Error("Anthropic tool schema reference cannot be resolved");
+    }
+    if (current === undefined) {
+      throw new Error("Anthropic tool schema reference cannot be resolved");
+    }
+  }
+  return current;
+}
+
+function normalizeAnthropicToolSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  let visitedNodes = 0;
+  const visit = (
+    value: unknown,
+    referenceStack: readonly string[],
+    depth: number
+  ): unknown => {
+    if (depth > MAX_ANTHROPIC_SCHEMA_DEPTH || ++visitedNodes > MAX_ANTHROPIC_SCHEMA_NODES) {
+      throw new Error("Anthropic tool schema exceeds the normalization budget");
+    }
+    if (Array.isArray(value)) {
+      return value.map((item) => visit(item, referenceStack, depth + 1));
+    }
+    if (!isRecord(value)) return value;
+
+    if (typeof value.$ref === "string") {
+      const reference = value.$ref;
+      if (Object.keys(value).some((key) => key !== "$ref")) {
+        throw new Error("Anthropic tool schema references cannot have sibling keywords");
+      }
+      if (referenceStack.includes(reference)) {
+        throw new Error("Anthropic tool schema contains a circular reference");
+      }
+      return visit(
+        resolveSchemaReference(schema, reference),
+        [...referenceStack, reference],
+        depth + 1
+      );
+    }
+
+    const normalized: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (forbiddenSchemaPointerTokens.has(key)) {
+        throw new Error("Anthropic tool schema contains a forbidden key");
+      }
+      // Anthropic strict tool use rejects numeric bounds and array-size
+      // keywords. The MCP/Zod boundary still enforces every original bound
+      // before any company tool can execute.
+      if (unsupportedAnthropicStrictSchemaKeywords.has(key)) continue;
+      normalized[key] = visit(item, referenceStack, depth + 1);
+    }
+    return normalized;
+  };
+
+  const normalized = visit(schema, [], 0);
+  if (!isRecord(normalized)) {
+    throw new Error("Anthropic tool input schema must be an object");
+  }
+  return normalized;
+}
+
 function toAnthropicTools(tools: LlmFunctionTool[]) {
   return tools.map((tool) => ({
     name: tool.name,
     ...(tool.description ? { description: tool.description } : {}),
-    input_schema: tool.parameters,
+    input_schema: normalizeAnthropicToolSchema(tool.parameters),
     strict: tool.strict
   }));
 }
