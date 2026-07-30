@@ -50,6 +50,50 @@ type AnthropicMessagesResponse = {
   stop_reason?: string | null;
 };
 
+type AnthropicErrorResponse = {
+  error?: {
+    type?: string;
+  };
+};
+
+const allowedAnthropicErrorTypes = new Set([
+  "api_error",
+  "authentication_error",
+  "billing_error",
+  "invalid_request_error",
+  "not_found_error",
+  "overloaded_error",
+  "permission_error",
+  "rate_limit_error",
+  "request_too_large",
+  "timeout_error"
+]);
+
+function safeAnthropicErrorType(value: unknown): string {
+  return typeof value === "string" && allowedAnthropicErrorTypes.has(value)
+    ? value
+    : "unknown_error";
+}
+
+export class AnthropicApiError extends Error {
+  readonly loggableDetails: {
+    provider: "anthropic";
+    status: number;
+    errorType: string;
+  };
+
+  constructor(status: number, errorType: unknown) {
+    const safeErrorType = safeAnthropicErrorType(errorType);
+    super(`Anthropic API request failed with status ${status} (${safeErrorType})`);
+    this.name = "AnthropicApiError";
+    this.loggableDetails = {
+      provider: "anthropic",
+      status,
+      errorType: safeErrorType
+    };
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -173,10 +217,17 @@ export class AnthropicMessagesGateway implements LlmGateway {
     });
 
     if (!response.ok) {
-      const details = (await response.text()).replace(/\s+/g, " ").slice(0, 1_000);
-      throw new Error(
-        `Anthropic API request failed with status ${response.status}${details ? `: ${details}` : ""}`
-      );
+      const responseText = await response.text();
+      let errorType: unknown = "unknown_error";
+      try {
+        const payload = JSON.parse(responseText) as AnthropicErrorResponse;
+        errorType = payload.error?.type;
+      } catch {
+        // Free-form provider bodies are intentionally excluded from production
+        // logs. The status plus a bounded structured type are sufficient for
+        // operations without risking prompt, credential, or user-data leakage.
+      }
+      throw new AnthropicApiError(response.status, errorType);
     }
 
     const payload = (await response.json()) as AnthropicMessagesResponse;
