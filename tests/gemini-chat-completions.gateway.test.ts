@@ -270,7 +270,20 @@ describe("Gemini native generateContent gateway", () => {
     const turn = await gateway.createTurn({
       instructions: "Use tools.",
       inputItems: [{ role: "user", content: [{ type: "input_text", text: "Sales" }] }],
-      tools: [],
+      tools: [
+        {
+          type: "function",
+          name: "get_sales_summary",
+          parameters: {
+            type: "object",
+            properties: { days: { type: "integer" } },
+            required: ["days"],
+            additionalProperties: false
+          },
+          strict: true
+        }
+      ],
+      toolChoice: "required",
       safetyIdentifier: "identifier"
     });
 
@@ -282,6 +295,10 @@ describe("Gemini native generateContent gateway", () => {
       expect.objectContaining({ "x-goog-api-key": "AQ.secret" })
     );
     expect((init?.headers as Record<string, string>).Authorization).toBeUndefined();
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    expect(body).toMatchObject({
+      toolConfig: { functionCallingConfig: { mode: "ANY" } }
+    });
   });
 
   it("omits function-calling fields when a user has no authorized tools", async () => {

@@ -275,7 +275,11 @@ export class GeminiChatCompletionsGateway implements LlmGateway {
         ...(request.tools.length > 0
           ? {
               tools: toGeminiNativeTools(request.tools),
-              toolConfig: { functionCallingConfig: { mode: "AUTO" } }
+              toolConfig: {
+                functionCallingConfig: {
+                  mode: request.toolChoice === "required" ? "ANY" : "AUTO"
+                }
+              }
             }
           : {}),
         generationConfig: { maxOutputTokens: this.options.maxOutputTokens }

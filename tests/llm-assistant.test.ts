@@ -268,6 +268,8 @@ describe("LLM company assistant", () => {
     });
     expect(JSON.stringify(gateway.requests)).not.toContain("user-secret-id");
     expect(gateway.requests[0]?.safetyIdentifier).toHaveLength(64);
+    expect(gateway.requests[0]?.toolChoice).toBe("required");
+    expect(gateway.requests[1]?.toolChoice).toBe("auto");
     expect(gateway.requests[1]?.inputItems).toContainEqual(
       expect.objectContaining({ type: "function_call_output", call_id: "call-1" })
     );
@@ -348,6 +350,7 @@ describe("LLM company assistant", () => {
     expect(sessions.session.closed).toBe(true);
     expect(gateway.requests[0]?.instructions).toContain("Genel sohbet modu açık");
     expect(gateway.requests[0]?.instructions).toContain("Genel sorular için şirket araçlarını çağırma");
+    expect(gateway.requests[0]?.toolChoice).toBe("auto");
   });
 
   it("fails closed on a tool-free company-data answer", async () => {
@@ -372,6 +375,7 @@ describe("LLM company assistant", () => {
       outcome: "unsupported",
       text: "Bu istek mevcut şirket verisi araçlarıyla yanıtlanamıyor."
     });
+    expect(gateway.requests[0]?.toolChoice).toBe("required");
     expect(result.text).not.toContain("999.999");
   });
 
@@ -600,6 +604,11 @@ describe("LLM company assistant", () => {
     expect(session.closed).toBe(true);
     expect(gateway.requests[0]?.instructions).toContain("önce describe_database");
     expect(gateway.requests[0]?.instructions).toContain("Ham SQL yazma");
+    expect(gateway.requests.map((request) => request.toolChoice)).toEqual([
+      "required",
+      "required",
+      "auto"
+    ]);
   });
 
   it("does not treat schema discovery as a successful answer when the data query fails", async () => {

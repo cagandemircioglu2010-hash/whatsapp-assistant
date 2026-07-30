@@ -302,7 +302,9 @@ export class AnthropicMessagesGateway implements LlmGateway {
         ...(request.tools.length > 0
           ? {
               tools: toAnthropicTools(request.tools),
-              tool_choice: { type: "auto" }
+              tool_choice: {
+                type: request.toolChoice === "required" ? "any" : "auto"
+              }
             }
           : {}),
         // Sonnet 5 enables adaptive thinking by default. Disabling it keeps the

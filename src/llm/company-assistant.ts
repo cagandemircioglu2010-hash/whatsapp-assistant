@@ -786,6 +786,13 @@ export class CompanyLlmAssistant implements AssistantResponder {
       });
 
       while (true) {
+        const requireCompanyTool =
+          companyDataTurn &&
+          successfulDataCalls === 0 &&
+          deniedCalls === 0 &&
+          failedCalls === 0 &&
+          unsupportedCalls === 0 &&
+          (!explicitSchemaInspection || successfulDiscoveryCalls === 0);
         const turn = await this.options.gateway.createTurn({
           instructions: instructions(
             this.options.timezone,
@@ -794,6 +801,7 @@ export class CompanyLlmAssistant implements AssistantResponder {
           ),
           inputItems,
           tools,
+          toolChoice: requireCompanyTool ? "required" : "auto",
           safetyIdentifier
         });
         inputItems.push(...turn.replayItems);
