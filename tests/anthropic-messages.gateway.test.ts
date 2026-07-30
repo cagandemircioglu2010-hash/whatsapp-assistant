@@ -138,6 +138,82 @@ describe("Anthropic Messages gateway", () => {
     ]);
   });
 
+  it("normalizes MCP schemas to Anthropic's strict-tool subset without mutating them", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "44" }],
+          stop_reason: "end_turn"
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+    const gateway = new AnthropicMessagesGateway({
+      apiKey: "anthropic-test-key",
+      model: "claude-sonnet-5",
+      maxOutputTokens: 700,
+      timeoutMs: 5_000
+    });
+    const parameters = {
+      type: "object",
+      properties: {
+        columns: {
+          type: "array",
+          items: { type: "string", maxLength: 127 },
+          maxItems: 12
+        },
+        primary_column: { $ref: "#/properties/columns/items" },
+        limit: { type: "integer", minimum: 1, maximum: 50 }
+      },
+      required: ["columns", "primary_column", "limit"],
+      additionalProperties: false,
+      $schema: "http://json-schema.org/draft-07/schema#"
+    };
+
+    await expect(
+      gateway.createTurn({
+        instructions: "Answer safely.",
+        inputItems: [
+          { role: "user", content: [{ type: "input_text", text: "14 + 30 kaç?" }] }
+        ],
+        tools: [
+          {
+            type: "function",
+            name: "query_database",
+            parameters,
+            strict: true
+          }
+        ],
+        safetyIdentifier: "safe-id"
+      })
+    ).resolves.toMatchObject({ outputText: "44" });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      tools: Array<{ input_schema: Record<string, unknown> }>;
+    };
+    const schema = body.tools[0]!.input_schema;
+    expect(schema).toMatchObject({
+      properties: {
+        columns: {
+          type: "array",
+          items: { type: "string", maxLength: 127 }
+        },
+        primary_column: { type: "string", maxLength: 127 },
+        limit: { type: "integer" }
+      }
+    });
+    expect(JSON.stringify(schema)).not.toMatch(
+      /"\$ref"|"minimum"|"maximum"|"minItems"|"maxItems"/
+    );
+    expect(parameters).toMatchObject({
+      properties: {
+        columns: { maxItems: 12 },
+        primary_column: { $ref: "#/properties/columns/items" },
+        limit: { minimum: 1, maximum: 50 }
+      }
+    });
+  });
+
   it("returns text, omits tools when unavailable, and surfaces safe HTTP failures", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       new Response(
