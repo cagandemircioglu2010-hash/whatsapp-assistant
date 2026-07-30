@@ -375,6 +375,9 @@ function schemaInspectionRequested(value: string): boolean {
       "enumerate",
       "say",
       "tara",
+      "ozet",
+      "summary",
+      "summarize",
       "available",
       "mevcut"
     ].some((root) => token === root || token.startsWith(root))
