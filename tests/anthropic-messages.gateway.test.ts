@@ -166,28 +166,50 @@ describe("Anthropic Messages gateway", () => {
     expect(body).not.toHaveProperty("tools");
     expect(body).not.toHaveProperty("tool_choice");
 
-    fetchMock.mockResolvedValueOnce(
-      new Response(
+    const providerDetail = "provider detail must not be copied into the application error";
+    const expectSafeFailure = async (
+      responseBody: string,
+      expectedErrorType: string
+    ): Promise<void> => {
+      fetchMock.mockResolvedValueOnce(
+        new Response(responseBody, {
+          status: 429,
+          headers: { "Content-Type": "application/json" }
+        })
+      );
+      const failure = await gateway.createTurn(request).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(AnthropicApiError);
+      expect(failure).toMatchObject({
+        message: `Anthropic API request failed with status 429 (${expectedErrorType})`,
+        loggableDetails: {
+          provider: "anthropic",
+          status: 429,
+          errorType: expectedErrorType
+        }
+      });
+      expect(String(failure)).not.toContain(providerDetail);
+    };
+
+    await expectSafeFailure(
+      JSON.stringify({
+        type: "error",
+        error: { type: "rate_limit_error", message: providerDetail }
+      }),
+      "rate_limit_error"
+    );
+    for (const unsafeType of [
+      "",
+      "unrecognized_provider_error",
+      `invalid_request_error${providerDetail.repeat(8)}`
+    ]) {
+      await expectSafeFailure(
         JSON.stringify({
           type: "error",
-          error: {
-            type: "rate_limit_error",
-            message: "provider detail must not be copied into the application error"
-          }
+          error: { type: unsafeType, message: providerDetail }
         }),
-        { status: 429, headers: { "Content-Type": "application/json" } }
-      )
-    );
-    const failure = await gateway.createTurn(request).catch((error: unknown) => error);
-    expect(failure).toBeInstanceOf(AnthropicApiError);
-    expect(failure).toMatchObject({
-      message: "Anthropic API request failed with status 429 (rate_limit_error)",
-      loggableDetails: {
-        provider: "anthropic",
-        status: 429,
-        errorType: "rate_limit_error"
-      }
-    });
-    expect(String(failure)).not.toContain("provider detail");
+        "unknown_error"
+      );
+    }
+    await expectSafeFailure(providerDetail, "unknown_error");
   });
 });
