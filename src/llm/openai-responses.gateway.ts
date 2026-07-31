@@ -32,7 +32,7 @@ export class OpenAIResponsesGateway implements LlmGateway {
         tool_choice: request.toolChoice === "required" ? "required" : "auto",
         parallel_tool_calls: true,
         reasoning: { effort: this.options.reasoningEffort, context: "current_turn" },
-        max_output_tokens: this.options.maxOutputTokens,
+        max_output_tokens: request.maxOutputTokens ?? this.options.maxOutputTokens,
         store: false,
         include: ["reasoning.encrypted_content"],
         safety_identifier: request.safetyIdentifier,

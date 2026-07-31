@@ -284,6 +284,7 @@ describe("Gemini native generateContent gateway", () => {
         }
       ],
       toolChoice: "required",
+      maxOutputTokens: 64,
       safetyIdentifier: "identifier"
     });
 
@@ -297,7 +298,8 @@ describe("Gemini native generateContent gateway", () => {
     expect((init?.headers as Record<string, string>).Authorization).toBeUndefined();
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     expect(body).toMatchObject({
-      toolConfig: { functionCallingConfig: { mode: "ANY" } }
+      toolConfig: { functionCallingConfig: { mode: "ANY" } },
+      generationConfig: { maxOutputTokens: 64 }
     });
   });
 

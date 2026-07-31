@@ -282,7 +282,9 @@ export class GeminiChatCompletionsGateway implements LlmGateway {
               }
             }
           : {}),
-        generationConfig: { maxOutputTokens: this.options.maxOutputTokens }
+        generationConfig: {
+          maxOutputTokens: request.maxOutputTokens ?? this.options.maxOutputTokens
+        }
       }),
       signal: AbortSignal.timeout(this.options.timeoutMs)
     });

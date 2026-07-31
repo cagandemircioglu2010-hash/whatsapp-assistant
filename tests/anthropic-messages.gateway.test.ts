@@ -185,14 +185,17 @@ describe("Anthropic Messages gateway", () => {
           }
         ],
         toolChoice: "required",
+        maxOutputTokens: 64,
         safetyIdentifier: "safe-id"
       })
     ).resolves.toMatchObject({ outputText: "44" });
 
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      max_tokens: number;
       tools: Array<{ input_schema: Record<string, unknown> }>;
     };
     const schema = body.tools[0]!.input_schema;
+    expect(body.max_tokens).toBe(64);
     expect(body).toMatchObject({ tool_choice: { type: "any" } });
     expect(schema).toMatchObject({
       properties: {
