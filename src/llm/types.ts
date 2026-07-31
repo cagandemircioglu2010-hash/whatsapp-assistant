@@ -17,6 +17,7 @@ export type LlmTurnRequest = {
   inputItems: unknown[];
   tools: LlmFunctionTool[];
   toolChoice?: "auto" | "required";
+  maxOutputTokens?: number;
   safetyIdentifier: string;
 };
 

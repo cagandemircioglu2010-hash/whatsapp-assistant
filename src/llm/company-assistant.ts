@@ -11,6 +11,11 @@ import type {
   McpToolDescriptor,
   McpToolResult
 } from "../mcp/session.js";
+import {
+  GatewayRequestClassifier,
+  type RequestClassification,
+  type RequestClassifier
+} from "./request-classifier.js";
 import type { LlmFunctionTool, LlmGateway } from "./types.js";
 
 type CompanyLlmAssistantOptions = {
@@ -24,6 +29,7 @@ type CompanyLlmAssistantOptions = {
   model?: string;
   reportsEnabled?: boolean;
   schemaDiscoveryEnabled?: boolean;
+  classifier?: RequestClassifier;
 };
 
 function localTimestamp(timezone: string): string {
@@ -417,7 +423,7 @@ function companyDataRequested(value: string): boolean {
       normalized
     );
   const dataQualifier =
-    /\b(bu\s+(?:ay|hafta|yil)|today|current|latest|son\w*|aktif\w*|active|gecik\w*|overdue|odenmemis\w*|unpaid|outstanding|remain\w*|toplam\w*|topla\w*|sum|total|amount|count|rate|oran\w*|kac|ne\s+kadar|liste\w*|list|show|goster\w*|bul\w*|find|getir\w*|fetch|hesapla\w*|calculate|compute|kullan\w*|use|durum\w*|status|analiz\w*|analy[sz]e|iyilestir\w*|improve|art\w*|azal\w*|compare|karsilastir\w*)\b/.test(
+    /\b(bu\s+(?:ay|hafta|yil)|today|current|latest|son\w*|aktif\w*|active|gecik\w*|overdue|odenmemis\w*|unpaid|outstanding|remain\w*|toplam\w*|topla\w*|sum|total|amount|count|rate|oran\w*|kac|ne\s+kadar|liste\w*|list|show|goster\w*|bul\w*|find|getir\w*|fetch|hesapla\w*|calculate|compute|kullan\w*|use|durum\w*|status|analiz\w*|analy[sz]e|iyilestir\w*|improve|art\w*|azal\w*|compare|karsilastir\w*|tekrar\w*|repeat)\b/.test(
       normalized
     );
   return explicitCompanyContext || fixedReportRequest || (businessSubject && dataQualifier);
@@ -439,6 +445,8 @@ function clearlyGeneralChatRequested(value: string): boolean {
     );
   const definitionQuestion =
     !ownership && /\b(?:what is|what does|ne demek|nedir)\b/u.test(normalized);
+  const explanatoryQuestion =
+    !ownership && /\b(?:how\s+does\b.{0,80}\bwork|nasil\s+calis\w*)\b/u.test(normalized);
   const arithmetic =
     /(?:\d\s*[-+*/×÷]\s*\d|\b(?:topla|toplam|carp|bol|sum|add|subtract|multiply|divide)\w*\b)/u.test(
       normalized
@@ -450,7 +458,95 @@ function clearlyGeneralChatRequested(value: string): boolean {
   const explicitResponseRequest =
     /\b(?:uzun cevap ver|give (?:me )?a long answer)\b/u.test(normalized) ||
     (/\d/u.test(normalized) && /\b(?:say\w* tekrar et|repeat (?:the )?number)\b/u.test(normalized));
-  return explicitGeneral || explicitLanguageAction || definitionQuestion || arithmetic || casual || explicitResponseRequest;
+  return explicitGeneral || explicitLanguageAction || definitionQuestion || explanatoryQuestion || arithmetic || casual || explicitResponseRequest;
+}
+
+function securitySensitiveRequested(value: string): boolean {
+  const normalized = normalizedRequest(value);
+  const hasSensitiveTarget =
+    /\b(?:secret\w*|credential\w*|password\w*|passwd|api\s*key\w*|token\w*|gizli\w*|sifre\w*|parola\w*|anahtar\w*|system\s+prompt|sistem\s+(?:prompt|istemi)|hidden\s+fields?|gizli\s+alan\w*|tool\s+(?:internals?|details?)|arac\s+(?:detay\w*|yapilandirma\w*))\b/u.test(
+      normalized
+    );
+  const hasDisclosureAction =
+    /\b(?:show|reveal|display|list|print|dump|expose|give\s+me|send\s+me|goster\w*|listele\w*|yazdir\w*|dok\w*|bana\s+ver\w*|paylas\w*)\b/u.test(
+      normalized
+    );
+  const hasBypassAction =
+    /\b(?:ignore|disregard|bypass|override|disable|yok\s+say|devre\s+disi|atla\w*)\b/u.test(
+      normalized
+    );
+  const hasControlTarget =
+    /\b(?:instructions?|rules?|tools?|prompts?|talimat\w*|kural\w*|arac\w*|istem\w*)\b/u.test(
+      normalized
+    );
+  return (
+    SUSPICIOUS_DATA_TEXT.test(value) ||
+    (hasSensitiveTarget && hasDisclosureAction) ||
+    (hasBypassAction && hasControlTarget)
+  );
+}
+
+function weakCompanySignal(value: string): boolean {
+  const normalized = normalizedRequest(value);
+  const explicitBusinessSignal =
+    /\b(?:company|business|sirket\w*|firma\w*|isletme\w*|sales?|satis\w*|revenue|gelir\w*|ciro\w*|refunds?|returns?|iade\w*|projects?|proje\w*|tasks?|gorev\w*|customers?|musteri\w*|orders?|siparis\w*|invoices?|fatura\w*|inventory|stock|stok\w*|kpi|metrics?|metrik\w*|database|veritabani\w*)\b/u.test(
+      normalized
+    );
+  const ownership = /\b(?:our|we|bizim|biz)\b/u.test(normalized);
+  const vagueBusinessSignal =
+    /\b(?:performance|performans\w*|momentum|results?|sonuc\w*|finances?|financial|mali\w*|islerimiz)\b/u.test(
+      normalized
+    );
+  return explicitBusinessSignal || (ownership && vagueBusinessSignal);
+}
+
+function companyRequestNeedsClarification(value: string): boolean {
+  const normalized = normalizedRequest(value);
+  const vagueOverview =
+    /\b(?:how\s+are\s+we\s+doing|how\s+is\s+our\s+business|compare\s+our\s+performance|analy[sz]e\s+(?:our\s+)?business|islerimiz\s+nasil\s+gidiyor|sirket(?:imiz|in)?\s+(?:nasil|durumu|performans\w*)|performans(?:imiz|imizi)?\s+(?:nasil|karsilastir\w*|analiz\w*))\b/u.test(
+      normalized
+    );
+  if (vagueOverview) return true;
+
+  const asksForComparison =
+    /\b(?:compare|comparison|versus|vs|karsilastir\w*|kiyasla\w*|karsilastirma\w*)\b/u.test(
+      normalized
+    );
+  if (!asksForComparison) return false;
+
+  const hasConcreteMetric =
+    /\b(?:sales?|satis\w*|revenue|gelir\w*|ciro\w*|refunds?|returns?|iade\w*|profit|kar\w*|customers?|musteri\w*|orders?|siparis\w*|invoices?|fatura\w*|tasks?|gorev\w*|projects?|proje\w*|inventory|stock|stok\w*|conversion|donusum\w*|kpi|metrics?|metrik\w*)\b/u.test(
+      normalized
+    );
+  const hasComparisonBasis =
+    /\b(?:with|against|to|ile|karsi|gore|bu\s+(?:ay|hafta|yil)|gecen\s+(?:ay|hafta|yil)|this\s+(?:month|week|year)|last\s+(?:month|week|year)|onceki\s+(?:ay|hafta|yil)|previous\s+(?:month|week|year))\b/u.test(
+      normalized
+    ) ||
+    /\b(?:19|20)\d{2}\b/u.test(normalized);
+  return !hasConcreteMetric || !hasComparisonBasis;
+}
+
+function deterministicClassification(value: string): RequestClassification | null {
+  if (securitySensitiveRequested(value)) return "SECURITY_SENSITIVE";
+  if (companyDataRequested(value)) {
+    return companyRequestNeedsClarification(value)
+      ? "COMPANY_NEEDS_CLARIFICATION"
+      : "COMPANY_CLEAR";
+  }
+  if (clearlyGeneralChatRequested(value)) return "GENERAL";
+  return null;
+}
+
+function clarificationText(user: AuthorizedUser): string {
+  return user.locale === "en"
+    ? "Which company metric and comparison period should I use? For example: compare this month's revenue with last month."
+    : "Hangi şirket metriğini ve karşılaştırma dönemini kullanmamı istersiniz? Örneğin: bu ayın cirosunu geçen ayla karşılaştır.";
+}
+
+function securityRefusalText(user: AuthorizedUser): string {
+  return user.locale === "en"
+    ? "I cannot reveal secrets, credentials, tokens, hidden fields, system prompts or internal tool configuration. I can still help with authorized company reports."
+    : "Gizli alanları, şifreleri, tokenları, sistem istemlerini veya araç yapılandırmasını gösteremem. Yetkili şirket raporlarıyla yardımcı olabilirim.";
 }
 
 const GROUNDING_STOP_WORDS = new Set([
@@ -708,7 +804,35 @@ function hybridMenuText(
 }
 
 export class CompanyLlmAssistant implements AssistantResponder {
-  constructor(private readonly options: CompanyLlmAssistantOptions) {}
+  private readonly classifier: RequestClassifier;
+
+  constructor(private readonly options: CompanyLlmAssistantOptions) {
+    this.classifier = options.classifier ?? new GatewayRequestClassifier(options.gateway);
+  }
+
+  private async classifyRequest(
+    value: string,
+    safetyIdentifier: string
+  ): Promise<RequestClassification> {
+    const deterministic = deterministicClassification(value);
+    if (deterministic) return deterministic;
+    try {
+      const classification = await this.classifier.classify({
+        text: value,
+        safetyIdentifier
+      });
+      // A model classification can expand vocabulary coverage, but it cannot
+      // downgrade company-like text into ungrounded general chat.
+      if (classification === "GENERAL" && weakCompanySignal(value)) {
+        return "COMPANY_NEEDS_CLARIFICATION";
+      }
+      return classification;
+    } catch {
+      // Classification failures degrade safely without taking down ordinary
+      // chat or forcing an arbitrary company-data tool.
+      return weakCompanySignal(value) ? "COMPANY_NEEDS_CLARIFICATION" : "GENERAL";
+    }
+  }
 
   async handle(
     user: AuthorizedUser,
@@ -771,6 +895,33 @@ export class CompanyLlmAssistant implements AssistantResponder {
         kind: "conversation"
       };
     }
+    const safetyIdentifier = createHmac("sha256", this.options.safetyIdentifierSecret)
+      .update("llm-safety-identifier\u0000")
+      .update(user.id)
+      .digest("hex");
+    const classification = this.options.generalChatEnabled
+      ? await this.classifyRequest(resolvedRequest.text, safetyIdentifier)
+      : securitySensitiveRequested(resolvedRequest.text)
+        ? "SECURITY_SENSITIVE"
+        : "COMPANY_CLEAR";
+    if (classification === "SECURITY_SENSITIVE") {
+      return {
+        text: securityRefusalText(user),
+        resource: null,
+        resources: [],
+        outcome: "denied",
+        kind: "conversation"
+      };
+    }
+    if (classification === "COMPANY_NEEDS_CLARIFICATION") {
+      return {
+        text: clarificationText(user),
+        resource: null,
+        resources: [],
+        outcome: "success",
+        kind: "conversation"
+      };
+    }
     const session = await this.options.sessions.open(user, context);
     const resources = new Set<string>();
     let successfulDataCalls = 0;
@@ -785,9 +936,7 @@ export class CompanyLlmAssistant implements AssistantResponder {
     const discoveredRelations = new Map<string, DiscoveredRelation>();
     const groundingEvidence: string[] = [];
     const explicitSchemaInspection = schemaInspectionRequested(resolvedRequest.text);
-    const companyDataTurn = this.options.generalChatEnabled
-      ? companyDataRequested(resolvedRequest.text)
-      : true;
+    const companyDataTurn = classification === "COMPANY_CLEAR";
     const providerRequestText = companyDataTurn
       ? withDefaultReportingPeriod(resolvedRequest.text, this.options.timezone)
       : resolvedRequest.text;
@@ -797,10 +946,6 @@ export class CompanyLlmAssistant implements AssistantResponder {
       const mcpTools = await session.listTools();
       const allowedToolNames = new Set(mcpTools.map((tool) => tool.name));
       const tools = mcpTools.map(toLlmTool);
-      const safetyIdentifier = createHmac("sha256", this.options.safetyIdentifierSecret)
-        .update("llm-safety-identifier\u0000")
-        .update(user.id)
-        .digest("hex");
       const inputItems: unknown[] = [];
       // Only prior inbound text is provided as context. Outbound company facts
       // may have become unauthorized since they were sent and must always be

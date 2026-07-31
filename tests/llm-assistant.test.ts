@@ -384,7 +384,6 @@ describe("LLM company assistant", () => {
     "What is our conversion rate?",
     "Bu ay ne kadar kazandık?",
     "Bu ay kâr ettik mi?",
-    "İşlerimiz nasıl gidiyor?",
     "How much did we make this month?",
     "Did we make a profit this month?"
   ])("fails closed on ambiguous tool-free company prompt: %s", async (prompt) => {
@@ -412,17 +411,229 @@ describe("LLM company assistant", () => {
     expect(result.text).not.toMatch(/42|999/);
   });
 
+  it("asks one clarification question for an ambiguous company request without opening data tools", async () => {
+    const gateway = new DirectAnswerGateway("unused");
+    const sessions = new FakeSessionFactory();
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions,
+      classifier: {
+        classify: async () => "COMPANY_NEEDS_CLARIFICATION"
+      },
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true,
+      schemaDiscoveryEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "ambiguous-comparison-user", department: null, role: "admin" },
+      "Compare our performance.",
+      { messageId: "message-ambiguous-comparison" }
+    );
+
+    expect(result).toEqual({
+      outcome: "success",
+      kind: "conversation",
+      resource: null,
+      resources: [],
+      text: "Hangi şirket metriğini ve karşılaştırma dönemini kullanmamı istersiniz? Örneğin: bu ayın cirosunu geçen ayla karşılaştır."
+    });
+    expect(gateway.requests).toHaveLength(0);
+    expect(sessions.actorId).toBeNull();
+  });
+
+  it("handles a known vague company overview locally without spending a classifier request", async () => {
+    const gateway = new DirectAnswerGateway("unused");
+    const sessions = new FakeSessionFactory();
+    let classifierCalls = 0;
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions,
+      classifier: {
+        classify: async () => {
+          classifierCalls += 1;
+          return "COMPANY_CLEAR";
+        }
+      },
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "vague-overview-user", department: null, role: "employee" },
+      "İşlerimiz nasıl gidiyor?",
+      { messageId: "message-vague-overview" }
+    );
+
+    expect(result.text).toContain("Hangi şirket metriğini");
+    expect(classifierCalls).toBe(0);
+    expect(gateway.requests).toHaveLength(0);
+    expect(sessions.actorId).toBeNull();
+  });
+
+  it("uses the second-stage classifier only when local rules are uncertain", async () => {
+    const requests: LlmTurnRequest[] = [];
+    const gateway: LlmGateway = {
+      createTurn: async (request) => {
+        requests.push(structuredClone(request));
+        return request.maxOutputTokens === 64
+          ? { outputText: "GENERAL", replayItems: [], functionCalls: [] }
+          : {
+              outputText: "Fotosentez, bitkilerin ışık enerjisini kimyasal enerjiye çevirmesidir.",
+              replayItems: [],
+              functionCalls: []
+            };
+      }
+    };
+    const sessions = new FakeSessionFactory();
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions,
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "uncertain-general-user", department: null, role: "employee" },
+      "Fotosentez hakkında kısa bilgi verir misin?",
+      { messageId: "message-uncertain-general" }
+    );
+
+    expect(result).toMatchObject({ outcome: "success", kind: "conversation" });
+    expect(result.text).toContain("Fotosentez");
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toMatchObject({
+      tools: [],
+      maxOutputTokens: 64,
+      toolChoice: "auto"
+    });
+    expect(requests[1]?.toolChoice).toBe("auto");
+    expect(sessions.actorId).toBe("uncertain-general-user");
+  });
+
+  it("uses the second-stage classifier to recognize new company vocabulary and require grounding", async () => {
+    const requests: LlmTurnRequest[] = [];
+    const gateway: LlmGateway = {
+      createTurn: async (request) => {
+        requests.push(structuredClone(request));
+        if (request.maxOutputTokens === 64) {
+          return { outputText: "COMPANY_CLEAR", replayItems: [], functionCalls: [] };
+        }
+        const hasToolResult = JSON.stringify(request.inputItems).includes("function_call_output");
+        return hasToolResult
+          ? {
+              outputText: "Kontrol edilen raporda 5 satış ve 25.000 TRY gelir bulunuyor.",
+              replayItems: [],
+              functionCalls: []
+            }
+          : {
+              outputText: "",
+              replayItems: [],
+              functionCalls: [
+                {
+                  callId: "classifier-expanded-1",
+                  name: "get_sales_summary",
+                  arguments: '{"start_date":"2026-07-07","end_date":"2026-07-13"}'
+                }
+              ]
+            };
+      }
+    };
+    const sessions = new FakeSessionFactory();
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions,
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "new-vocabulary-user", department: "Sales", role: "employee" },
+      "Bu ay churn oranımız kaç?",
+      { messageId: "message-new-vocabulary" }
+    );
+
+    expect(result).toMatchObject({ outcome: "success", kind: "business" });
+    expect(requests.map((request) => request.toolChoice)).toEqual([
+      "auto",
+      "required",
+      "auto"
+    ]);
+    expect(sessions.session.calls).toHaveLength(1);
+  });
+
+  it("does not let a model downgrade company-like uncertainty into ungrounded general chat", async () => {
+    const gateway = new DirectAnswerGateway("unused");
+    const sessions = new FakeSessionFactory();
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions,
+      classifier: { classify: async () => "GENERAL" },
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "downgrade-user", department: null, role: "employee" },
+      "Bizim momentum nasıl?",
+      { messageId: "message-downgrade" }
+    );
+
+    expect(result.text).toContain("Hangi şirket metriğini");
+    expect(gateway.requests).toHaveLength(0);
+    expect(sessions.actorId).toBeNull();
+  });
+
+  it("does not treat ordinary ownership language as a company-data signal", async () => {
+    const gateway = new DirectAnswerGateway(
+      "The solar system formed approximately 4.6 billion years ago."
+    );
+    const sessions = new FakeSessionFactory();
+    const assistant = new CompanyLlmAssistant({
+      gateway,
+      sessions,
+      classifier: { classify: async () => "GENERAL" },
+      safetyIdentifierSecret: "s".repeat(32),
+      timezone: "Europe/Istanbul",
+      maxToolCalls: 4,
+      generalChatEnabled: true
+    });
+
+    const result = await assistant.handle(
+      { id: "ordinary-ownership-user", department: null, role: "employee", locale: "en" },
+      "How old is our solar system?",
+      { messageId: "message-ordinary-ownership" }
+    );
+
+    expect(result.text).toContain("4.6 billion");
+    expect(result.kind).toBe("conversation");
+    expect(gateway.requests).toHaveLength(1);
+    expect(sessions.actorId).toBe("ordinary-ownership-user");
+  });
+
   it.each([
     ["Proje yönetimi nedir?", "Proje yönetimi genel bir disiplindir."],
     ["Translate ‘sales report’ into Turkish.", "satış raporu"],
     ["Translate my sentence into Turkish.", "cümlem"],
-    ["Explain database normalization.", "normalizasyon açıklaması"]
+    ["Explain database normalization.", "normalizasyon açıklaması"],
+    ["API token nedir?", "API token bir kimlik doğrulama bilgisidir."]
   ])("keeps generic hybrid prompts tool-free: %s", async (prompt, answer) => {
     const gateway = new DirectAnswerGateway(answer);
     const sessions = new FakeSessionFactory();
     const assistant = new CompanyLlmAssistant({
       gateway,
       sessions,
+      classifier: { classify: async () => "GENERAL" },
       safetyIdentifierSecret: "s".repeat(32),
       timezone: "Europe/Istanbul",
       maxToolCalls: 4,
@@ -1343,10 +1554,11 @@ describe("LLM company assistant", () => {
       { messageId: "message-adversarial" }
     );
 
-    expect(result.outcome).toBe("unsupported");
-    expect(result.text).toBe("Bu istek mevcut şirket verisi araçlarıyla yanıtlanamıyor.");
+    expect(result.outcome).toBe("denied");
+    expect(result.text).toContain("Gizli alanları");
     expect(sessions.session.calls).toEqual([]);
-    expect(JSON.stringify(requests[1]?.inputItems)).toContain("unknown_tool");
+    expect(requests).toHaveLength(0);
+    expect(sessions.actorId).toBeNull();
   });
 
   it("never executes a real company tool omitted by permission filtering", async () => {

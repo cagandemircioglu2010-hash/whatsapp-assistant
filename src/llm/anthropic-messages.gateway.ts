@@ -296,7 +296,7 @@ export class AnthropicMessagesGateway implements LlmGateway {
       },
       body: JSON.stringify({
         model: this.options.model,
-        max_tokens: this.options.maxOutputTokens,
+        max_tokens: request.maxOutputTokens ?? this.options.maxOutputTokens,
         system: request.instructions,
         messages: toAnthropicMessages(request),
         ...(request.tools.length > 0
